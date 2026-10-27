@@ -1,0 +1,47 @@
+[benchmark] fixture 0
+[benchmark] fixture 5
+[benchmark] fixture 10
+[benchmark] fixture 15
+[benchmark] fixture 20
+[benchmark] fixture 25
+[benchmark] registered 30 workspaces; starting HTTP server
+[benchmark] HTTP server ready on http://127.0.0.1:52823
+[benchmark] roots=30 repeat=1/5 starting
+[benchmark] warm-up: 0/3000 tasks, 30 errors
+[benchmark] warm-up: 0/3000 tasks, 30 errors
+[benchmark] warm-up: 0/3000 tasks, 30 errors
+[benchmark] warm-up: 0/3000 tasks, 30 errors
+[benchmark] warm-up: 0/3000 tasks, 30 errors
+[benchmark] warm-up: 100/3000 tasks, 29 errors
+[benchmark] warm-up: 600/3000 tasks, 24 errors
+[benchmark] warm-up: 1300/3000 tasks, 17 errors
+[benchmark] warm-up: 1800/3000 tasks, 12 errors
+[benchmark] warm-up: 2500/3000 tasks, 5 errors
+[benchmark] roots=30 repeat=1/5 natural=958.3ms
+[benchmark] roots=30 repeat=1/5 complete
+[benchmark] roots=30 repeat=2/5 starting
+[benchmark] warm-up: 400/3000 tasks, 26 errors
+[benchmark] warm-up: 1000/3000 tasks, 20 errors
+[benchmark] warm-up: 1600/3000 tasks, 14 errors
+[benchmark] warm-up: 2400/3000 tasks, 6 errors
+[benchmark] roots=30 repeat=2/5 natural=1222.8ms
+[benchmark] roots=30 repeat=2/5 complete
+[benchmark] roots=30 repeat=3/5 starting
+[benchmark] warm-up: 400/3000 tasks, 26 errors
+[benchmark] warm-up: 800/3000 tasks, 22 errors
+[benchmark] warm-up: 1600/3000 tasks, 14 errors
+[benchmark] warm-up: 2400/3000 tasks, 6 errors
+[benchmark] roots=30 repeat=3/5 natural=1199.3ms
+[benchmark] roots=30 repeat=3/5 complete
+[benchmark] roots=30 repeat=4/5 starting
+[benchmark] warm-up: 400/3000 tasks, 26 errors
+[benchmark] warm-up: 1200/3000 tasks, 18 errors
+[benchmark] warm-up: 2200/3000 tasks, 8 errors
+[benchmark] roots=30 repeat=4/5 natural=1214.4ms
+[benchmark] roots=30 repeat=4/5 complete
+[benchmark] roots=30 repeat=5/5 starting
+[benchmark] warm-up: 400/3000 tasks, 26 errors
+[benchmark] warm-up: 1400/3000 tasks, 16 errors
+[benchmark] warm-up: 2200/3000 tasks, 8 errors
+[benchmark] roots=30 repeat=5/5 natural=1237.1ms
+[benchmark] roots=30 repeat=5/5 complete

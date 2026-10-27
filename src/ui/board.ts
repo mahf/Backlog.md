@@ -47,6 +47,14 @@ export type ColumnData = {
 	tasks: Task[];
 };
 
+export type BoardWorkspaceScope = {
+	id: string;
+	name: string;
+	writable: boolean;
+	tasks: Task[];
+	statuses: string[];
+};
+
 type BoardSharedFilters = {
 	searchQuery: string;
 	excludeStatus?: string[];
@@ -175,7 +183,11 @@ export function formatTaskListItem(
 	const prefix = formatPrefix(task);
 
 	// Cross-branch tasks are dimmed to indicate read-only status
-	const content = `{bold}${task.id}{/bold}${type}${project}${dueDate} - ${task.title}${assignee}${labels}${branch}`;
+	const workspace =
+		typeof (task as Task & { workspaceId?: unknown }).workspaceId === "string"
+			? ` [${(task as Task & { workspaceId: string }).workspaceId}]`
+			: "";
+	const content = `{bold}${task.id}{/bold}${workspace}${type}${project}${dueDate} - ${task.title}${assignee}${labels}${branch}`;
 	if (isMoving) {
 		return `${prefix}{magenta-fg}► ${content}{/}`;
 	}
@@ -244,7 +256,11 @@ export function shouldRebuildColumns(current: ColumnData[], next: ColumnData[]):
 }
 
 export function upsertBoardTask(tasks: readonly Task[], task: Task): Task[] {
-	const existingIndex = tasks.findIndex((candidate) => candidate.id === task.id);
+	const workspaceId = (task as Task & { workspaceId?: string }).workspaceId;
+	const existingIndex = tasks.findIndex(
+		(candidate) =>
+			candidate.id === task.id && (candidate as Task & { workspaceId?: string }).workspaceId === workspaceId,
+	);
 	if (existingIndex === -1) return [...tasks, task];
 	const next = [...tasks];
 	next[existingIndex] = task;
@@ -327,7 +343,24 @@ export async function renderBoardTui(
 		dateFormat?: string;
 		hideEmptyColumns?: boolean;
 		projectName?: string;
+		readOnly?: boolean;
 		createTask?: (input: TaskCreateInput) => Promise<Task>;
+		/** Target-aware mutation hooks used by aggregate boards. */
+		editTask?: (task: Task, screen: ScreenInterface) => Promise<Awaited<ReturnType<Core["editTaskInTui"]>>>;
+		moveTask?: (
+			task: Task,
+			input: {
+				taskIds: string[];
+				targetStatus: string;
+				orderedTaskIds: string[];
+			},
+		) => Promise<Awaited<ReturnType<Core["moveTasksToStatus"]>>>;
+		workspaceScopes?: BoardWorkspaceScope[];
+		onWorkspaceSwitch?: (scope: BoardWorkspaceScope) => void | Promise<void>;
+		workspaceId?: string;
+		workspaceCores?: Map<string, Core>;
+		selectedTask?: Task;
+		onOpenWorkflowInbox?: (screen: ScreenInterface) => void | Promise<void>;
 		screen?: ScreenInterface;
 		taskComposer?: (options: TaskComposerOptions) => Promise<Task | null>;
 	},
@@ -381,7 +414,7 @@ export async function renderBoardTui(
 		let popupOpen = false;
 		// The task popup renders a snapshot, so the board remembers which task it shows and
 		// what that task's content looked like to keep it in step with later updates.
-		let openPopup: { taskId: string; signature: string; close: () => void } | null = null;
+		let openPopup: { taskId: string; workspaceId?: string; signature: string; close: () => void } | null = null;
 		const closeOpenPopup = () => {
 			openPopup?.close();
 			openPopup = null;
@@ -401,11 +434,47 @@ export async function renderBoardTui(
 		let programmaticColumnSelection = false;
 		let renderingView = false;
 		let fallbackCore: Core | null = null;
+		let currentWorkspaceId = options?.workspaceId;
+		const taskWorkspaceId = (task: Task): string | undefined =>
+			typeof (task as Task & { workspaceId?: unknown }).workspaceId === "string"
+				? (task as Task & { workspaceId: string }).workspaceId
+				: currentWorkspaceId;
+		const taskIdentityIsAmbiguous = (task: Task): boolean => {
+			const workspaceId = taskWorkspaceId(task);
+			return currentTasks.some(
+				(candidate) => candidate !== task && candidate.id === task.id && taskWorkspaceId(candidate) === workspaceId,
+			);
+		};
 		// Board mutations reuse the caller's Core so every surface reads the same project root.
-		const getCore = async (): Promise<Core> => {
+		const getCore = async (task?: Task): Promise<Core> => {
+			if (options?.readOnly)
+				throw new Error("This board view is read-only; choose a single writable workspace for changes.");
+			const workspaceId = task ? taskWorkspaceId(task) : currentWorkspaceId;
+			const workspaceCore = workspaceId && options?.workspaceCores?.get(workspaceId);
+			if (workspaceCore) return workspaceCore;
 			if (options?.core) return options.core;
 			fallbackCore ??= await createRuntimeCore({ enableWatchers: true });
 			return fallbackCore;
+		};
+		const switchWorkspace = async (direction: 1 | -1) => {
+			const scopes = options?.workspaceScopes ?? [];
+			if (scopes.length < 2) return;
+			const currentIndex = scopes.findIndex((scope) => scope.id === currentWorkspaceId);
+			const nextIndex =
+				currentIndex === -1
+					? direction === 1
+						? 0
+						: scopes.length - 1
+					: (currentIndex + direction + scopes.length) % scopes.length;
+			const next = scopes[nextIndex];
+			if (!next) return;
+			currentWorkspaceId = next.id;
+			currentTasks = next.tasks;
+			configuredWorkflowStatuses = [...next.statuses];
+			currentStatuses = [...next.statuses];
+			options?.onWorkspaceSwitch && (await options.onWorkspaceSwitch(next));
+			closeOpenPopup();
+			renderView();
 		};
 		const configuredTaskTypes = getTaskTypeValues(options?.types);
 		const configuredProjects = getProjectValues(options?.projects);
@@ -755,11 +824,12 @@ export async function renderBoardTui(
 			syncColumnSelectionDisplay(column, active);
 		};
 
+		const taskSelectionKey = (task: Task): string => `${taskWorkspaceId(task) ?? ""}\0${task.id}`;
 		const getSelectedTaskId = (): string | undefined => {
 			const column = columns[currentCol];
 			if (!column) return undefined;
 			const selectedIndex = column.list.selected ?? 0;
-			return column.tasks[selectedIndex]?.id;
+			return column.tasks[selectedIndex] ? taskSelectionKey(column.tasks[selectedIndex]) : undefined;
 		};
 
 		const focusColumn = (idx: number, preferredRow?: number, activate = true) => {
@@ -796,11 +866,17 @@ export async function renderBoardTui(
 				for (let colIdx = 0; colIdx < columns.length; colIdx += 1) {
 					const column = columns[colIdx];
 					if (!column) continue;
-					const taskIndex = column.tasks.findIndex((task) => task.id === taskId);
+					const taskIndex = column.tasks.findIndex((task) => taskSelectionKey(task) === taskId);
 					if (taskIndex !== -1) {
 						focusColumn(colIdx, taskIndex, activate);
 						return;
 					}
+				}
+				const matchingTasks = columns.flatMap((column) => column.tasks).filter((task) => task.id === taskId);
+				if (matchingTasks.length === 1) {
+					const onlyMatch = matchingTasks[0];
+					const onlyKey = onlyMatch ? taskSelectionKey(onlyMatch) : undefined;
+					if (onlyKey) return restoreSelection(onlyKey);
 				}
 			}
 			const safeIndex = Math.min(columns.length - 1, Math.max(0, currentCol));
@@ -1159,11 +1235,13 @@ export async function renderBoardTui(
 			screen.render();
 		};
 
-		renderView();
+		renderView(options?.selectedTask ? taskSelectionKey(options.selectedTask) : undefined);
 		const firstColumn = columns[0];
 		if (firstColumn) {
 			currentCol = 0;
-			if (firstColumn.tasks.length > 0) {
+			if (options?.selectedTask) {
+				restoreSelection(taskSelectionKey(options.selectedTask));
+			} else if (firstColumn.tasks.length > 0) {
 				selectColumnRow(firstColumn, 0, true);
 			}
 			setColumnActiveState(firstColumn, true);
@@ -1285,6 +1363,32 @@ export async function renderBoardTui(
 			const outcome = getCreatedTaskBoardOutcome(task, visible);
 			showTransientFooter(` {${outcome.tone}-fg}${outcome.message}{/}`, 6000, false);
 			renderView(outcome.focusTaskId);
+		});
+
+		screen.key(["w"], async () => {
+			if (popupOpen || filterPopupOpen || modalOpen || moveOp || currentFocus === "filters") return;
+			await switchWorkspace(1);
+		});
+		screen.key(["W"], async () => {
+			if (popupOpen || filterPopupOpen || modalOpen || moveOp || currentFocus === "filters") return;
+			await switchWorkspace(-1);
+		});
+		screen.key(["C-g"], async () => {
+			if (popupOpen || filterPopupOpen || modalOpen || moveOp || currentFocus === "filters") return;
+			if (!options?.onOpenWorkflowInbox) return;
+			await runWithModalGuard(async () => {
+				try {
+					await options.onOpenWorkflowInbox?.(screen);
+				} catch (error) {
+					showTransientFooter(
+						` {red-fg}Workflow inbox failed: ${error instanceof Error ? error.message : String(error)}{/}`,
+						6000,
+					);
+				}
+			});
+			restoreColumnFocus(currentCol);
+			updateFooter();
+			screen.render();
 		});
 
 		screen.key(["p", "P"], () => {
@@ -1457,9 +1561,17 @@ export async function renderBoardTui(
 		});
 
 		const openTaskEditor = async (task: Task) => {
+			if (taskIdentityIsAmbiguous(task)) {
+				showTransientFooter(
+					` {yellow-fg}Task ${task.id} exists in multiple workspaces; switch to one workspace before editing.{/}`,
+				);
+				return;
+			}
 			try {
 				const core = await getCore();
-				const result = await core.editTaskInTui(task.id, screen, task);
+				const result = await (options?.editTask
+					? options.editTask(task, screen)
+					: core.editTaskInTui(task.id, screen, task));
 				if (result.reason === "read_only") {
 					showTransientFooter(formatReadOnlyNotice(result.task ?? task));
 					return;
@@ -1498,7 +1610,10 @@ export async function renderBoardTui(
 							editedTask.filePath !== undefined &&
 							existingTask.filePath !== undefined &&
 							existingTask.filePath === editedTask.filePath;
-						return existingTask.id === task.id || matchesByFile ? editedTask : existingTask;
+						return (existingTask.id === task.id && taskWorkspaceId(existingTask) === taskWorkspaceId(task)) ||
+							matchesByFile
+							? { ...editedTask, ...(taskWorkspaceId(task) ? { workspaceId: taskWorkspaceId(task) } : {}) }
+							: existingTask;
 					});
 					// Feed the edit through the shared update funnel so the board and any open
 					// popup refresh the same way a watcher update would.
@@ -1519,13 +1634,19 @@ export async function renderBoardTui(
 
 		/** The archive key, pressed on a column row or inside the task popup. */
 		const archiveFromBoard = async (task: Task): Promise<void> => {
-			const result = await archiveTaskFromTui(await getCore(), task, (popup) =>
+			if (taskIdentityIsAmbiguous(task)) {
+				showTransientFooter(
+					` {yellow-fg}Task ${task.id} exists in multiple workspaces; switch to one workspace before archiving.{/}`,
+				);
+				return;
+			}
+			const result = await archiveTaskFromTui(await getCore(task), task, (popup) =>
 				runWithModalGuard(() => openConfirmPopup({ screen, ...popup })),
 			);
 			if (result.archived) {
-				currentTasks = currentTasks.filter((t) => t.id !== task.id);
+				currentTasks = currentTasks.filter((t) => !(t.id === task.id && taskWorkspaceId(t) === taskWorkspaceId(task)));
 				// The task's own popup has nothing left to show.
-				if (openPopup?.taskId === task.id) closeOpenPopup();
+				if (openPopup?.taskId === task.id && openPopup.workspaceId === taskWorkspaceId(task)) closeOpenPopup();
 				renderView();
 			}
 			const notice = formatArchiveNotice(task, result);
@@ -1550,16 +1671,27 @@ export async function renderBoardTui(
 			}
 
 			const { contentArea, close } = popup;
-			openPopup = { taskId: task.id, signature: taskContentSignature(task), close };
+			openPopup = {
+				taskId: task.id,
+				workspaceId: taskWorkspaceId(task),
+				signature: taskContentSignature(task),
+				close,
+			};
 
 			contentArea.key(["escape", "q"], () => {
 				closeOpenPopup();
 				// A status change while the popup was open moves the task to another column,
 				// so follow it instead of returning to the column it was opened from.
-				const columnIndex = columns.findIndex((column) => column.tasks.some((candidate) => candidate.id === task.id));
+				const columnIndex = columns.findIndex((column) =>
+					column.tasks.some(
+						(candidate) => candidate.id === task.id && taskWorkspaceId(candidate) === taskWorkspaceId(task),
+					),
+				);
 				restoreColumnFocus(
 					columnIndex === -1 ? currentCol : columnIndex,
-					columns[columnIndex]?.tasks.findIndex((candidate) => candidate.id === task.id),
+					columns[columnIndex]?.tasks.findIndex(
+						(candidate) => candidate.id === task.id && taskWorkspaceId(candidate) === taskWorkspaceId(task),
+					),
 				);
 			});
 
@@ -1596,7 +1728,9 @@ export async function renderBoardTui(
 				popupSyncPending = true;
 				return;
 			}
-			const nextTask = currentTasks.find((candidate) => candidate.id === current.taskId);
+			const nextTask = currentTasks.find(
+				(candidate) => candidate.id === current.taskId && taskWorkspaceId(candidate) === current.workspaceId,
+			);
 			if (!nextTask) {
 				closeOpenPopup();
 				restoreColumnFocus(currentCol);
@@ -1691,13 +1825,19 @@ export async function renderBoardTui(
 			try {
 				const core = await getCore();
 				const config = await core.fs.loadConfig();
-
-				const { movedTasks, changedTasks, failures } = await core.moveTasksToStatus({
-					taskIds,
-					targetStatus,
-					orderedTaskIds,
-					autoCommit: config?.autoCommit ?? false,
-				});
+				const movingTask = currentTasks.find((task) => task.id === taskIds[0]);
+				if (!movingTask) throw new Error("The selected task is no longer available.");
+				const movingWorkspace = taskWorkspaceId(movingTask);
+				if (
+					taskIds.some(
+						(id) => taskWorkspaceId(currentTasks.find((task) => task.id === id) ?? movingTask) !== movingWorkspace,
+					)
+				) {
+					throw new Error("Cannot move tasks from different workspaces in one operation.");
+				}
+				const { movedTasks, changedTasks, failures } = await (options?.moveTask
+					? options.moveTask(movingTask, { taskIds, targetStatus, orderedTaskIds })
+					: core.moveTasksToStatus({ taskIds, targetStatus, orderedTaskIds, autoCommit: config?.autoCommit ?? false }));
 
 				// Update local state with all moved and changed tasks (includes ordinal updates)
 				const changedTasksMap = new Map(changedTasks.map((t) => [t.id, t]));
@@ -1771,13 +1911,15 @@ export async function renderBoardTui(
 				const core = await getCore();
 				const config = await core.fs.loadConfig();
 
-				// Persist the move using core API
-				const { updatedTask, changedTasks } = await core.reorderTask({
-					taskId,
-					targetStatus,
-					orderedTaskIds,
-					autoCommit: config?.autoCommit ?? false,
-				});
+				// Persist the move using the selected workspace's mutation hook when supplied.
+				const movingTask = currentTasks.find((task) => task.id === taskId);
+				if (!movingTask) throw new Error("The selected task is no longer available.");
+				const { updatedTask, changedTasks } = options?.moveTask
+					? await options.moveTask(movingTask, { taskIds: [taskId], targetStatus, orderedTaskIds }).then((result) => ({
+							updatedTask: result.movedTasks[0] ?? movingTask,
+							changedTasks: result.changedTasks,
+						}))
+					: await core.reorderTask({ taskId, targetStatus, orderedTaskIds, autoCommit: config?.autoCommit ?? false });
 
 				// Update local state with all changed tasks (includes ordinal updates)
 				const changedTasksMap = new Map(changedTasks.map((t) => [t.id, t]));
@@ -1823,6 +1965,12 @@ export async function renderBoardTui(
 			const taskIndex = column.list.selected ?? 0;
 			const task = column.tasks[taskIndex];
 			if (!task) return;
+			if (taskIdentityIsAmbiguous(task)) {
+				showTransientFooter(
+					` {yellow-fg}Task ${task.id} exists in multiple workspaces; switch to one workspace before moving.{/}`,
+				);
+				return;
+			}
 
 			// Prevent move mode for cross-branch tasks
 			if (task.branch) {

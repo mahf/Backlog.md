@@ -358,6 +358,12 @@ export interface PrefixConfig {
 	task: string;
 }
 
+export interface WorkflowConfig {
+	enabled: boolean;
+	rqPath?: string;
+	pythonPath?: string;
+}
+
 export interface BacklogConfig {
 	projectName: string;
 	/** Assignees applied to new tasks when none are provided. Empty or unset means no default. */
@@ -398,6 +404,7 @@ export interface BacklogConfig {
 	onStatusChange?: string;
 	/** ID prefix configuration for tasks and drafts. Defaults to { task: "task", draft: "draft" } */
 	prefixes?: PrefixConfig;
+	workflow?: WorkflowConfig;
 	mcp?: {
 		http?: {
 			host?: string;

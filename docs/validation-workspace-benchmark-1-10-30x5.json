@@ -1,0 +1,10 @@
+{
+	"status": "superseded",
+	"reason": "The original combined run emitted no JSON before its process was bounded; use the corrected per-size artifacts instead.",
+	"artifacts": [
+		"validation-workspace-benchmark-1x1-corrected.json",
+		"validation-workspace-benchmark-1x5-corrected.json",
+		"validation-workspace-benchmark-10x5-corrected.json",
+		"validation-workspace-benchmark-30x5-corrected.json"
+	]
+}

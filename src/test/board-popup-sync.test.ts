@@ -76,6 +76,8 @@ async function withBoardPopup(
 		hideEmptyColumns?: boolean;
 		/** Columns to step right through before opening the popup. */
 		startColumn?: number;
+		/** Rows to step down before opening the popup. */
+		startRow?: number;
 	},
 	run: (context: {
 		screen: ScreenInterface & EmittingWidget;
@@ -104,6 +106,10 @@ async function withBoardPopup(
 
 		for (let step = 0; step < (options.startColumn ?? 0); step++) {
 			pressKey(screen, "right");
+			await Bun.sleep(10);
+		}
+		for (let step = 0; step < (options.startRow ?? 0); step++) {
+			pressKey(screen, "down");
 			await Bun.sleep(10);
 		}
 
@@ -139,6 +145,41 @@ async function withBoardPopup(
 }
 
 describe("board task popup stays in sync with live task state", () => {
+	it("keeps board shortcuts behind the workflow inbox modal", async () => {
+		const descriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+		Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+		const screen = createScreen({ smartCSR: false }) as ScreenInterface & EmittingWidget;
+		let composerCalls = 0;
+		let inboxOpen = false;
+		try {
+			const boardPromise = renderBoardTui([createTask()], BOARD_STATUSES, "horizontal", 20, {
+				screen,
+				taskComposer: async () => {
+					composerCalls += 1;
+					return null;
+				},
+				onOpenWorkflowInbox: async (activeScreen) => {
+					inboxOpen = true;
+					(activeScreen as unknown as EmittingWidget).emit("keypress", "n", { name: "n", full: "n" });
+					await Bun.sleep(30);
+					inboxOpen = false;
+				},
+			});
+			await Bun.sleep(20);
+			pressKey(screen, "C-g");
+			await Bun.sleep(10);
+			expect(inboxOpen).toBe(true);
+			expect(composerCalls).toBe(0);
+			await Bun.sleep(40);
+			pressKey(screen, "q");
+			await withTimeout(boardPromise, "board close", 5000);
+		} finally {
+			screen.destroy();
+			if (descriptor) Object.defineProperty(process.stdout, "isTTY", descriptor);
+			else Reflect.deleteProperty(process.stdout, "isTTY");
+		}
+	});
+
 	it("rebuilds the popup after an in-popup editor edit", async () => {
 		const edited = createTask({ title: "Edited title", description: "UPDATED-BODY" });
 		await withBoardPopup(
@@ -157,6 +198,18 @@ describe("board task popup stays in sync with live task state", () => {
 				expect(text()).toContain("Edited title");
 			},
 		);
+	});
+
+	it("restores the duplicate workspace row after popup Escape", async () => {
+		const workspaceA = createTask({ title: "Workspace A", workspaceId: "a" } as Partial<Task>);
+		const workspaceB = createTask({ title: "Workspace B", workspaceId: "b" } as Partial<Task>);
+		await withBoardPopup({ tasks: [workspaceA, workspaceB], startRow: 1 }, async ({ screen, focused, text }) => {
+			pressKey(focused(), "escape");
+			await Bun.sleep(20);
+			pressKey(screen, "enter");
+			await Bun.sleep(30);
+			expect(text()).toContain("[b] - Workspace B");
+		});
 	});
 
 	it("rebuilds the popup when the task changes outside the board", async () => {

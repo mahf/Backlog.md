@@ -1,0 +1,16 @@
+{
+	"environment": {
+		"platform": "win32",
+		"runtime": "v24.3.0",
+		"repeats": 5,
+		"rq": "C:/Users/haifeng.ma/OneDrive/AI工具配置/workflow/tools/rq.py"
+	},
+	"results": {
+		"30": {
+			"roots": 30,
+			"tasksPerRoot": 100,
+			"status": "initializing",
+			"sampleCount": 0
+		}
+	}
+}

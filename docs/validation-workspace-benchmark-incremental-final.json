@@ -1,0 +1,176 @@
+{
+	"environment": {
+		"platform": "win32",
+		"runtime": "v24.3.0",
+		"bun": "1.3.10",
+		"repeats": 5,
+		"rq": "C:/Users/haifeng.ma/OneDrive/AI工具配置/workflow/tools/rq.py"
+	},
+	"results": {
+		"1": {
+			"roots": 1,
+			"tasksPerRoot": 100,
+			"status": "measured",
+			"sampleCount": 5,
+			"rqCalls": 10,
+			"coldRqCalls": [1, 1, 1, 1, 1],
+			"warmRqCalls": [0, 0, 0, 0, 0],
+			"changedRqCalls": [1, 1, 1, 1, 1],
+			"cacheHit": true,
+			"changedOnlyOneRoot": true,
+			"coldAggregate": {
+				"medianMs": 925.6347999999998,
+				"p95Ms": 975.433100000002
+			},
+			"warmAggregate": {
+				"medianMs": 0.4819000000006781,
+				"p95Ms": 0.5824999999999818
+			},
+			"changedToVisibleAggregate": {
+				"medianMs": 937.4613000000027,
+				"p95Ms": 970.7259000000013
+			},
+			"material": {
+				"medianMs": 918.0544000000009,
+				"p95Ms": 986.8624000000018
+			},
+			"respond": {
+				"medianMs": 1224.3565999999992,
+				"p95Ms": 1473.4505000000026
+			},
+			"materialSamples": [896.7471999999998, 918.0544000000009, 986.8624000000018, 939.681099999998, 884.3941999999952],
+			"respondSamples": [1179.0333, 1213.1641, 1473.4505000000026, 1246.6232000000018, 1224.3565999999992],
+			"httpSampleCount": {
+				"material": 5,
+				"respond": 5
+			},
+			"productionAggregateWarm": {
+				"medianMs": 6.5943999999999505,
+				"p95Ms": 805.2224
+			},
+			"productionNaturalVisible": {
+				"medianMs": 937.6133000000009,
+				"p95Ms": 956.1981000000014
+			},
+			"productionSamples": {
+				"aggregateWarm": [805.2224, 5.982500000000073, 6.5943999999999505, 6.694700000000012, 6.052400000000489],
+				"naturalVisible": [
+					778.1182000000001, 939.0149000000001, 937.3193999999985, 937.6133000000009, 956.1981000000014
+				]
+			}
+		},
+		"10": {
+			"roots": 10,
+			"tasksPerRoot": 100,
+			"status": "measured",
+			"sampleCount": 5,
+			"rqCalls": 55,
+			"coldRqCalls": [10, 10, 10, 10, 10],
+			"warmRqCalls": [0, 0, 0, 0, 0],
+			"changedRqCalls": [1, 1, 1, 1, 1],
+			"cacheHit": true,
+			"changedOnlyOneRoot": true,
+			"coldAggregate": {
+				"medianMs": 3160.4038,
+				"p95Ms": 3616.638500000001
+			},
+			"warmAggregate": {
+				"medianMs": 6.075699999986682,
+				"p95Ms": 6.458399999988615
+			},
+			"changedToVisibleAggregate": {
+				"medianMs": 1134.1481000000058,
+				"p95Ms": 1230.8761999999988
+			},
+			"material": {
+				"medianMs": 1065.9388000000035,
+				"p95Ms": 1105.0305999999982
+			},
+			"respond": {
+				"medianMs": 1361.951700000005,
+				"p95Ms": 1410.5148999999947
+			},
+			"materialSamples": [
+				1065.9388000000035, 1095.9092999999993, 974.9575999999943, 957.5985000000219, 1105.0305999999982
+			],
+			"respondSamples": [
+				1410.5148999999947, 1377.2747999999992, 1361.951700000005, 1202.2797000000137, 1335.2419999999984
+			],
+			"httpSampleCount": {
+				"material": 5,
+				"respond": 5
+			},
+			"productionAggregateWarm": {
+				"medianMs": 27.751499999983935,
+				"p95Ms": 35.717600000003586
+			},
+			"productionNaturalVisible": {
+				"medianMs": 1111.459199999983,
+				"p95Ms": 1385.5427000000054
+			},
+			"productionSamples": {
+				"aggregateWarm": [
+					27.29090000000724, 28.499599999995553, 35.717600000003586, 27.751499999983935, 26.38529999999446
+				],
+				"naturalVisible": [
+					948.7360999999946, 1321.9870000000083, 1385.5427000000054, 1111.459199999983, 952.7483000000066
+				]
+			}
+		},
+		"30": {
+			"roots": 30,
+			"tasksPerRoot": 100,
+			"status": "measured",
+			"sampleCount": 5,
+			"coldRqCalls": [30, 30, 30, 30, 30],
+			"warmRqCalls": [0, 0, 0, 0, 0],
+			"changedRqCalls": [1, 1, 1, 1, 1],
+			"cacheHit": true,
+			"changedOnlyOneRoot": true,
+			"coldAggregate": {
+				"medianMs": 9539.171700000006,
+				"p95Ms": 13230.911499999987
+			},
+			"warmAggregate": {
+				"medianMs": 15.179700000036974,
+				"p95Ms": 17.874599999981
+			},
+			"changedToVisibleAggregate": {
+				"medianMs": 1087.5585999999894,
+				"p95Ms": 1475.304300000018
+			},
+			"material": {
+				"medianMs": 968.8729000000167,
+				"p95Ms": 1178.8549999999814
+			},
+			"respond": {
+				"medianMs": 1221.9282999999705,
+				"p95Ms": 1314.1550999999745
+			},
+			"materialSamples": [
+				968.8729000000167, 979.343499999959, 959.2907999999588, 929.8475999999791, 1178.8549999999814
+			],
+			"respondSamples": [
+				1202.869800000044, 1221.9282999999705, 1233.6590000000433, 1213.06110000005, 1314.1550999999745
+			],
+			"httpSampleCount": {
+				"material": 5,
+				"respond": 5
+			},
+			"productionAggregateWarm": {
+				"medianMs": 85.32110000000102,
+				"p95Ms": 93.4597000000067
+			},
+			"productionNaturalVisible": {
+				"medianMs": 1215.888500000001,
+				"p95Ms": 1391.380300000019
+			},
+			"productionSamples": {
+				"aggregateWarm": [93.4597000000067, 85.32110000000102, 76.02110000001267, 78.07730000000447, 91.36459999997169],
+				"naturalVisible": [
+					1216.0063000000082, 1391.380300000019, 1027.9937999999966, 1020.9177999999956, 1215.888500000001
+				]
+			}
+		}
+	}
+}

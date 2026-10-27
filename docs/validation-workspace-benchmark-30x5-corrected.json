@@ -1,0 +1,19 @@
+{
+	"environment": {
+		"platform": "win32",
+		"runtime": "v24.3.0",
+		"repeats": 5,
+		"rq": "C:/Users/haifeng.ma/OneDrive/AI工具配置/workflow/tools/rq.py"
+	},
+	"results": {
+		"30": {
+			"roots": 30,
+			"tasksPerRoot": 100,
+			"status": "failed",
+			"sampleCount": 0,
+			"requestedSampleCount": 5,
+			"failure": "Warm-up deadline reached with 2800/3000 tasks and two loading roots: benchmark-22 and benchmark-6. No 30-root latency sample is claimed.",
+			"completedSamples": 0
+		}
+	}
+}

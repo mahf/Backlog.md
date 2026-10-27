@@ -15,11 +15,121 @@ import type {
 
 const API_BASE = "/api";
 
+export interface WorkspaceSummary {
+	id: string;
+	name: string;
+	rootPath: string;
+	writable: boolean;
+	error?: string;
+}
+
+export interface WorkspaceTasksResponse {
+	tasks: Array<Task & { workspaceId: string }>;
+	errors: Array<{ workspaceId: string; error: string }>;
+}
+
+export type WorkflowRequestKind = "decision" | "review" | "acceptance" | "authorization" | string;
+
+export interface WorkflowRequest {
+	requestId: string;
+	kind: WorkflowRequestKind;
+	question?: string;
+	recommendation?: string;
+	impact?: string;
+	scope?: string;
+	workspaceId?: string;
+	taskId?: string;
+	ticket?: string;
+	status?: string;
+	state?: string;
+	actionable?: boolean;
+	currentRevision?: string | number;
+	current_revision?: string | number;
+	revision?: string | number;
+	decisionId?: string;
+	questionId?: string;
+	assertions?: Array<{ id?: string; text?: string; result?: string }>;
+	evidence?:
+		| Array<{ label?: string; name?: string; value?: string; result?: string; passed?: boolean }>
+		| Record<string, unknown>;
+	transport?: string;
+	delivery?: string | { status?: string; state?: string };
+	delivery_at?: string;
+	deliveryAt?: string;
+	answered_at?: string;
+	checklist?: Array<{
+		id?: string;
+		label?: string;
+		text?: string;
+		assertion?: string;
+		pre?: string;
+		step?: string;
+		op?: string;
+		expect?: string;
+		actual?: string;
+		checked?: boolean;
+	}>;
+	entry?: string;
+	preconditions?: string[];
+	steps?: string[];
+	expectations?: string[];
+	action?: string;
+	actions?: string[];
+	manual_cases?: Array<{
+		id?: string;
+		label?: string;
+		text?: string;
+		assertion?: string;
+		pre?: string;
+		step?: string;
+		op?: string;
+		expect?: string;
+		actual?: string;
+		checked?: boolean;
+	}>;
+	material_missing?: boolean;
+	environment?: string;
+	deadline?: string;
+	materials?: string[];
+	materialMissing?: boolean;
+	materialError?: string;
+	[key: string]: unknown;
+}
+
+export interface WorkflowSnapshot {
+	requests?: WorkflowRequest[];
+	tasks?: Array<Record<string, unknown>>;
+	review_items?: Array<Record<string, unknown>>;
+	reviewItems?: Array<Record<string, unknown>>;
+	agents?:
+		| { source?: string; available?: boolean; collected_at?: string; items?: Array<Record<string, unknown>> }
+		| Array<Record<string, unknown>>;
+	errors?: Array<{ workspaceId?: string; error: string }>;
+	warnings?: Array<{ workspaceId?: string; warning: string }>;
+	[key: string]: unknown;
+}
+
+export interface WorkflowResult {
+	ok: boolean;
+	exitCode?: number;
+	data?: unknown;
+	stdout?: string;
+	stderr?: string;
+	saved?: boolean;
+	projectionPending?: boolean;
+	content?: string;
+	transport?: string;
+	delivery?: string | { status?: string; state?: string };
+	delivery_at?: string;
+	deliveryAt?: string;
+}
+
 export interface ReorderTaskPayload {
 	taskId: string;
 	targetStatus: string;
 	orderedTaskIds: string[];
 	targetMilestone?: string | null;
+	workspaceId?: string;
 }
 
 export interface MoveTasksPayload {
@@ -164,7 +274,8 @@ export class ApiClient {
 				const controller = new AbortController();
 				const timeoutId = setTimeout(() => controller.abort(), timeout);
 
-				const response = await fetch(url, {
+				const requestUrl = typeof window === "undefined" ? url : this.withWorkspaceScope(url, options);
+				const response = await fetch(requestUrl, {
 					...options,
 					signal: controller.signal,
 					headers: {
@@ -207,6 +318,21 @@ export class ApiClient {
 			throw lastError;
 		}
 		throw new NetworkError(`Request failed after ${retries + 1} attempts: ${lastError?.message}`);
+	}
+
+	private withWorkspaceScope(url: string, options: RequestInit = {}): string {
+		const scope = new URLSearchParams(window.location.search).get("workspace");
+		const params = new URLSearchParams(window.location.search);
+		const target = params.get("taskWorkspace");
+		if (target && options.method && options.method !== "GET" && url.includes("/tasks")) {
+			if (!url.includes("workspace="))
+				return `${url}${url.includes("?") ? "&" : "?"}workspace=${encodeURIComponent(target)}`;
+		}
+		if (!scope || url.includes("workspace=") || url.includes("allWorkspaces=")) return url;
+		const separator = url.includes("?") ? "&" : "?";
+		return scope === "all"
+			? `${url}${separator}allWorkspaces=true`
+			: `${url}${separator}workspace=${encodeURIComponent(scope)}`;
 	}
 
 	private async fetchWithoutRetry(url: string, options: RequestInit = {}): Promise<Response> {
@@ -327,33 +453,47 @@ export class ApiClient {
 	}
 
 	/** Reads one task through the detail path, so the response already carries its dependency graph. */
-	async fetchTask(id: string): Promise<TaskDetail> {
-		return this.fetchJson<TaskDetail>(`${API_BASE}/task/${encodeURIComponent(id)}`);
+	async fetchTask(id: string, workspaceId?: string): Promise<TaskDetail> {
+		const target = workspaceId ? `?workspace=${encodeURIComponent(workspaceId)}` : "";
+		return this.fetchJson<TaskDetail>(`${API_BASE}/task/${encodeURIComponent(id)}${target}`);
 	}
 
-	async createTask(task: Omit<Task, "id" | "createdDate">): Promise<Task> {
-		return this.fetchJson<Task>(`${API_BASE}/tasks`, {
+	async createTask(task: Omit<Task, "id" | "createdDate">, workspaceId?: string): Promise<Task> {
+		const target = workspaceId ? `?workspace=${encodeURIComponent(workspaceId)}` : "";
+		return this.fetchJson<Task>(`${API_BASE}/tasks${target}`, {
 			method: "POST",
-			body: JSON.stringify(task),
+			body: JSON.stringify(workspaceId ? { ...task, workspaceId } : task),
 		});
 	}
 
-	async updateTask(id: string, updates: TaskUpdateRequest): Promise<Task> {
-		return this.fetchJson<Task>(`${API_BASE}/tasks/${id}`, {
+	async updateTask(id: string, updates: TaskUpdateRequest, workspaceId?: string): Promise<Task> {
+		const taskWorkspace =
+			workspaceId ??
+			(typeof window === "undefined" ? undefined : new URLSearchParams(window.location.search).get("taskWorkspace"));
+		const target = taskWorkspace ? `?workspace=${encodeURIComponent(taskWorkspace)}` : "";
+		return this.fetchJson<Task>(`${API_BASE}/tasks/${id}${target}`, {
 			method: "PUT",
-			body: JSON.stringify(updates),
+			body: JSON.stringify(taskWorkspace ? { ...updates, workspaceId: taskWorkspace } : updates),
 		});
 	}
 
-	async reorderTask(payload: ReorderTaskPayload): Promise<{ success: boolean; task: Task; changedTasks: Task[] }> {
-		return this.fetchJson<{ success: boolean; task: Task; changedTasks: Task[] }>(`${API_BASE}/tasks/reorder`, {
-			method: "POST",
-			body: JSON.stringify(payload),
-		});
+	async reorderTask(
+		payload: ReorderTaskPayload,
+		workspaceId?: string,
+	): Promise<{ success: boolean; task: Task; changedTasks: Task[] }> {
+		const target = workspaceId ? `?workspace=${encodeURIComponent(workspaceId)}` : "";
+		return this.fetchJson<{ success: boolean; task: Task; changedTasks: Task[] }>(
+			`${API_BASE}/tasks/reorder${target}`,
+			{
+				method: "POST",
+				body: JSON.stringify(payload),
+			},
+		);
 	}
 
-	async moveTasks(payload: MoveTasksPayload): Promise<MoveTasksResult> {
-		return this.fetchJson<MoveTasksResult>(`${API_BASE}/tasks/move`, {
+	async moveTasks(payload: MoveTasksPayload, workspaceId?: string): Promise<MoveTasksResult> {
+		const target = workspaceId ? `?workspace=${encodeURIComponent(workspaceId)}` : "";
+		return this.fetchJson<MoveTasksResult>(`${API_BASE}/tasks/move${target}`, {
 			method: "POST",
 			body: JSON.stringify(payload),
 		});
@@ -419,7 +559,7 @@ export class ApiClient {
 	}
 
 	async fetchStatuses(): Promise<string[]> {
-		const response = await fetch(`${API_BASE}/statuses`);
+		const response = await this.fetchWithRetry(`${API_BASE}/statuses`);
 		if (!response.ok) {
 			throw new Error("Failed to fetch statuses");
 		}
@@ -427,7 +567,7 @@ export class ApiClient {
 	}
 
 	async fetchConfig(): Promise<BacklogConfig> {
-		const response = await fetch(`${API_BASE}/config`);
+		const response = await this.fetchWithRetry(`${API_BASE}/config`);
 		if (!response.ok) {
 			throw new Error("Failed to fetch config");
 		}
@@ -435,7 +575,7 @@ export class ApiClient {
 	}
 
 	async updateConfig(config: BacklogConfig): Promise<BacklogConfig> {
-		const response = await fetch(`${API_BASE}/config`, {
+		const response = await this.fetchWithRetry(`${API_BASE}/config`, {
 			method: "PUT",
 			headers: {
 				"Content-Type": "application/json",
@@ -448,8 +588,78 @@ export class ApiClient {
 		return response.json();
 	}
 
+	async fetchWorkspaces(): Promise<WorkspaceSummary[]> {
+		return this.fetchJson<WorkspaceSummary[]>(`${API_BASE}/workspaces`);
+	}
+
+	async fetchWorkspaceTasks(): Promise<WorkspaceTasksResponse> {
+		return this.fetchJson<WorkspaceTasksResponse>(`${API_BASE}/workspaces/tasks?allWorkspaces=true`);
+	}
+
+	async fetchWorkflow(workspaceId?: string, refresh = false): Promise<WorkflowSnapshot> {
+		const params = new URLSearchParams();
+		if (workspaceId === "all") params.set("allWorkspaces", "true");
+		else if (workspaceId) params.set("workspace", workspaceId);
+		if (refresh) params.set("refresh", "true");
+		const target = params.toString() ? `?${params.toString()}` : "";
+		const raw = await this.fetchJson<WorkflowSnapshot | { ok: boolean; data?: WorkflowSnapshot; error?: string }>(
+			`${API_BASE}/workflow${target}`,
+		);
+		if (typeof raw === "object" && raw !== null && "ok" in raw && typeof raw.ok === "boolean" && !Array.isArray(raw)) {
+			const envelope = raw as { ok: boolean; data?: WorkflowSnapshot; error?: unknown };
+			if (envelope.ok && envelope.data) return envelope.data;
+			if (!envelope.ok)
+				return {
+					requests: [],
+					tasks: [],
+					review_items: [],
+					agents: [],
+					errors: [{ error: typeof envelope.error === "string" ? envelope.error : "Workflow unavailable" }],
+				};
+		}
+		return raw as WorkflowSnapshot;
+	}
+
+	async respondWorkflow(input: {
+		requestId: string;
+		reply: string;
+		action?: string;
+		expectedRevision?: string | number;
+		idempotencyKey: string;
+		by?: string;
+		workspaceId?: string;
+	}): Promise<WorkflowResult> {
+		const target = input.workspaceId ? `?workspace=${encodeURIComponent(input.workspaceId)}` : "";
+		return this.fetchJson<WorkflowResult>(`${API_BASE}/workflow/respond${target}`, {
+			method: "POST",
+			body: JSON.stringify(input),
+		});
+	}
+
+	async cancelWorkflow(requestId: string, reason: string, workspaceId?: string): Promise<WorkflowResult> {
+		const target = workspaceId ? `?workspace=${encodeURIComponent(workspaceId)}` : "";
+		return this.fetchJson<WorkflowResult>(`${API_BASE}/workflow/cancel${target}`, {
+			method: "POST",
+			body: JSON.stringify({ requestId, reason }),
+		});
+	}
+
+	async resumeWorkflow(requestId: string, workspaceId?: string): Promise<WorkflowResult> {
+		const target = workspaceId ? `?workspace=${encodeURIComponent(workspaceId)}` : "";
+		return this.fetchJson<WorkflowResult>(`${API_BASE}/workflow/resume${target}`, {
+			method: "POST",
+			body: JSON.stringify({ requestId }),
+		});
+	}
+
+	async fetchWorkflowMaterial(path: string, workspaceId?: string): Promise<WorkflowResult> {
+		const params = new URLSearchParams({ path });
+		if (workspaceId) params.set("workspace", workspaceId);
+		return this.fetchJson<WorkflowResult>(`${API_BASE}/workflow/material?${params.toString()}`);
+	}
+
 	async fetchDocs(): Promise<Document[]> {
-		const response = await fetch(`${API_BASE}/docs`);
+		const response = await this.fetchWithRetry(`${API_BASE}/docs`);
 		if (!response.ok) {
 			throw new Error("Failed to fetch documentation");
 		}
@@ -457,7 +667,7 @@ export class ApiClient {
 	}
 
 	async fetchDoc(filename: string): Promise<Document> {
-		const response = await fetch(`${API_BASE}/docs/${encodeURIComponent(filename)}`);
+		const response = await this.fetchWithRetry(`${API_BASE}/docs/${encodeURIComponent(filename)}`);
 		if (!response.ok) {
 			throw await toApiError(response, "Failed to fetch document");
 		}
@@ -465,7 +675,7 @@ export class ApiClient {
 	}
 
 	async fetchDocument(id: string): Promise<Document> {
-		const response = await fetch(`${API_BASE}/doc/${encodeURIComponent(id)}`);
+		const response = await this.fetchWithRetry(`${API_BASE}/doc/${encodeURIComponent(id)}`);
 		if (!response.ok) {
 			throw await toApiError(response, "Failed to fetch document");
 		}
@@ -481,7 +691,7 @@ export class ApiClient {
 			payload.path = path;
 		}
 
-		const response = await fetch(`${API_BASE}/docs/${encodeURIComponent(filename)}`, {
+		const response = await this.fetchWithRetry(`${API_BASE}/docs/${encodeURIComponent(filename)}`, {
 			method: "PUT",
 			headers: {
 				"Content-Type": "application/json",
@@ -495,7 +705,7 @@ export class ApiClient {
 	}
 
 	async createDoc(filename: string, content: string, path?: string): Promise<Document & { success?: boolean }> {
-		const response = await fetch(`${API_BASE}/docs`, {
+		const response = await this.fetchWithRetry(`${API_BASE}/docs`, {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",
@@ -519,7 +729,7 @@ export class ApiClient {
 	}
 
 	async fetchDecisions(): Promise<Decision[]> {
-		const response = await fetch(`${API_BASE}/decisions`);
+		const response = await this.fetchWithRetry(`${API_BASE}/decisions`);
 		if (!response.ok) {
 			throw new Error("Failed to fetch decisions");
 		}
@@ -527,7 +737,7 @@ export class ApiClient {
 	}
 
 	async fetchDecision(id: string): Promise<Decision> {
-		const response = await fetch(`${API_BASE}/decisions/${encodeURIComponent(id)}`);
+		const response = await this.fetchWithRetry(`${API_BASE}/decisions/${encodeURIComponent(id)}`);
 		if (!response.ok) {
 			throw await toApiError(response, "Failed to fetch decision");
 		}
@@ -535,7 +745,7 @@ export class ApiClient {
 	}
 
 	async fetchDecisionData(id: string): Promise<Decision> {
-		const response = await fetch(`${API_BASE}/decision/${encodeURIComponent(id)}`);
+		const response = await this.fetchWithRetry(`${API_BASE}/decision/${encodeURIComponent(id)}`);
 		if (!response.ok) {
 			throw await toApiError(response, "Failed to fetch decision");
 		}
@@ -543,7 +753,7 @@ export class ApiClient {
 	}
 
 	async updateDecision(id: string, content: string): Promise<void> {
-		const response = await fetch(`${API_BASE}/decisions/${encodeURIComponent(id)}`, {
+		const response = await this.fetchWithRetry(`${API_BASE}/decisions/${encodeURIComponent(id)}`, {
 			method: "PUT",
 			headers: {
 				"Content-Type": "text/plain",
@@ -556,7 +766,7 @@ export class ApiClient {
 	}
 
 	async createDecision(title: string): Promise<Decision> {
-		const response = await fetch(`${API_BASE}/decisions`, {
+		const response = await this.fetchWithRetry(`${API_BASE}/decisions`, {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",
@@ -570,7 +780,7 @@ export class ApiClient {
 	}
 
 	async fetchMilestones(): Promise<Milestone[]> {
-		const response = await fetch(`${API_BASE}/milestones`);
+		const response = await this.fetchWithRetry(`${API_BASE}/milestones`);
 		if (!response.ok) {
 			throw new Error("Failed to fetch milestones");
 		}
@@ -578,7 +788,7 @@ export class ApiClient {
 	}
 
 	async fetchArchivedMilestones(): Promise<Milestone[]> {
-		const response = await fetch(`${API_BASE}/milestones/archived`);
+		const response = await this.fetchWithRetry(`${API_BASE}/milestones/archived`);
 		if (!response.ok) {
 			throw new Error("Failed to fetch archived milestones");
 		}
@@ -586,7 +796,7 @@ export class ApiClient {
 	}
 
 	async fetchMilestone(id: string): Promise<Milestone> {
-		const response = await fetch(`${API_BASE}/milestones/${encodeURIComponent(id)}`);
+		const response = await this.fetchWithRetry(`${API_BASE}/milestones/${encodeURIComponent(id)}`);
 		if (!response.ok) {
 			throw new Error("Failed to fetch milestone");
 		}
@@ -594,7 +804,7 @@ export class ApiClient {
 	}
 
 	async createMilestone(title: string, description?: string, dueDate?: string): Promise<Milestone> {
-		const response = await fetch(`${API_BASE}/milestones`, {
+		const response = await this.fetchWithRetry(`${API_BASE}/milestones`, {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",
@@ -613,7 +823,7 @@ export class ApiClient {
 		title: string,
 		dueDate?: string | null,
 	): Promise<{ success: boolean; milestone?: Milestone | null; message?: string }> {
-		const response = await fetch(`${API_BASE}/milestones/${encodeURIComponent(id)}`, {
+		const response = await this.fetchWithRetry(`${API_BASE}/milestones/${encodeURIComponent(id)}`, {
 			method: "PUT",
 			headers: {
 				"Content-Type": "application/json",
@@ -631,7 +841,7 @@ export class ApiClient {
 		id: string,
 		options: { taskHandling?: "clear" | "keep" | "reassign"; reassignTo?: string } = {},
 	): Promise<{ success: boolean; message?: string }> {
-		const response = await fetch(`${API_BASE}/milestones/${encodeURIComponent(id)}`, {
+		const response = await this.fetchWithRetry(`${API_BASE}/milestones/${encodeURIComponent(id)}`, {
 			method: "DELETE",
 			headers: {
 				"Content-Type": "application/json",
@@ -646,7 +856,7 @@ export class ApiClient {
 	}
 
 	async archiveMilestone(id: string): Promise<{ success: boolean; milestone?: Milestone | null }> {
-		const response = await fetch(`${API_BASE}/milestones/${encodeURIComponent(id)}/archive`, {
+		const response = await this.fetchWithRetry(`${API_BASE}/milestones/${encodeURIComponent(id)}/archive`, {
 			method: "POST",
 		});
 		if (!response.ok) {

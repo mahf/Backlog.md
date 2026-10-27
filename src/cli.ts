@@ -22,13 +22,22 @@ import { registerInstructionsCommand } from "./commands/instructions.ts";
 import { registerMcpCommand } from "./commands/mcp.ts";
 import { pickTaskForEditWizard, runTaskCreateWizard, runTaskEditWizard } from "./commands/task-wizard.ts";
 import { watchJson } from "./commands/watch-json.ts";
+import { registerWorkflowCommand } from "./commands/workflow.ts";
+import { registerWorkspaceCommand } from "./commands/workspace.ts";
 import { DEFAULT_DIRECTORIES, DEFAULT_FILES, DEFAULT_STATUSES } from "./constants/index.ts";
 import { type ArchivedTaskMovePlan, moveArchivedTasks, previewArchivedTaskMove } from "./core/archived-task-move.ts";
 import { CONTENT_RECORD_WORDS, describeContentRecordChange, formatCleanupResult } from "./core/backlog.ts";
 import { type DuplicateRepairPlan, findLocalDuplicateTaskIds } from "./core/duplicate-task-repair.ts";
 import { initializeProject } from "./core/init.ts";
 import { buildMilestoneBuckets, collectArchivedMilestoneKeys, milestoneKey } from "./core/milestones.ts";
-import { loadTaskDetail, loadTaskListItems } from "./core/task-detail.ts";
+import { loadTaskDetail, loadTaskListItems, type TaskListItem } from "./core/task-detail.ts";
+import {
+	assertAggregateReadOnly,
+	assertWorkspaceWritable,
+	isReadOnlyCliInvocation,
+	listQueryWorkspaces,
+	resolveWorkspaceRoot,
+} from "./core/workspace-context.ts";
 import { isConfigValueError } from "./file-system/operations.ts";
 import {
 	decisionListJson,
@@ -148,6 +157,7 @@ import {
 	taskIdsEqual,
 	taskNotFoundMessage,
 } from "./utils/task-path.ts";
+import { applyTaskFilters } from "./utils/task-search.ts";
 import { sectionTasks, sortTasks, TASK_SORT_FIELDS } from "./utils/task-sorting.ts";
 import { formatValidTaskTypeValues, getTaskTypeValues, resolveTaskTypeValues } from "./utils/task-type-config.ts";
 import { getTerminalStatus } from "./utils/terminal-status.ts";
@@ -891,12 +901,29 @@ async function requireRuntimeCwd(): Promise<string> {
  * Exits with error message if no Backlog.md project is found.
  */
 async function requireProjectRoot(): Promise<string> {
-	const root = await findBacklogRoot(await requireRuntimeCwd());
-	if (!root) {
-		console.error("No Backlog.md project found. Run `backlog init` to initialize.");
-		process.exit(1);
+	const selection = {
+		...(program?.opts?.() as { workspace?: string; allWorkspaces?: boolean } | undefined),
+		...(taskCmd?.opts?.() as { workspace?: string; allWorkspaces?: boolean } | undefined),
+		...(taskListCommand?.opts?.() as { workspace?: string; allWorkspaces?: boolean } | undefined),
+	};
+	const result = await resolveWorkspaceRoot(selection ?? {}, await requireRuntimeCwd());
+	const args = process.argv.slice(2);
+	let commandIndex = 0;
+	while (commandIndex < args.length && args[commandIndex]?.startsWith("-")) {
+		commandIndex += args[commandIndex] === "--workspace" ? 2 : 1;
 	}
-	return root;
+	const command = args[commandIndex] ?? "command";
+	let action = command;
+	if (command === "task" || command === "tasks") {
+		let actionIndex = commandIndex + 1;
+		while (actionIndex < args.length && args[actionIndex]?.startsWith("-")) {
+			actionIndex += args[actionIndex] === "--workspace" ? 2 : 1;
+		}
+		action = args[actionIndex] ?? "command";
+	}
+	if (selection?.allWorkspaces) assertAggregateReadOnly(true, `${command} ${action}`);
+	if (!isReadOnlyCliInvocation(args)) assertWorkspaceWritable(result.workspace, `${command} ${action}`);
+	return result.rootPath;
 }
 
 // Windows color fix
@@ -1063,6 +1090,8 @@ const program = new Command();
 program
 	.name("backlog")
 	.description("Backlog.md - Project management CLI")
+	.option("--workspace <id>", "target a registered directory workspace; distinct from task --project")
+	.option("--all-workspaces", "aggregate task queries from all registered directory workspaces")
 	.version(version, "-v, --version", "display version number")
 	.showSuggestionAfterError()
 	.showHelpAfterError("Run with --help to see accepted fields and examples.");
@@ -1938,6 +1967,9 @@ addHelpSchema(program.command("init [projectName]"), {
 	);
 
 const taskCmd = program.command("task").aliases(["tasks"]);
+taskCmd
+	.option("--workspace <id>", "target a registered directory workspace; distinct from task --project")
+	.option("--all-workspaces", "query all registered directory workspaces; writes require --workspace");
 
 /** `--json` and `--plain` may be given to the parent `task` command as well as to its subcommand. */
 function taskReadOptions(options: ReadOutputOptions): ReadOutputOptions {
@@ -2607,6 +2639,64 @@ function isDocumentSearchResult(result: SearchResult): result is DocumentSearchR
  * Prints the sections of a plain task list: each status under its heading, or the one section of
  * a flat priority list under its own heading with the status on every row.
  */
+async function runAllWorkspaceTaskList(
+	options: OptionValues,
+	outputMode: ReadOutputMode,
+	listWindow: ListWindow,
+): Promise<void> {
+	const entries = await listQueryWorkspaces();
+	const errors: Array<{ workspaceId: string; error: string }> = [];
+	const rows: Array<TaskListItem & { workspaceId: string }> = [];
+	const filter = {
+		query: typeof options.search === "string" ? options.search.trim() || undefined : undefined,
+		status: options.status ? (parseDelimitedStringList(options.status) ?? options.status) : undefined,
+		type: parseDelimitedStringList(options.type) ?? undefined,
+		project: parseDelimitedStringList(options.project) ?? undefined,
+		priority: options.priority ? String(options.priority) : undefined,
+		assignee: options.assignee,
+		unassigned: options.unassigned,
+		labels: parseDelimitedStringList(options.labels) ?? undefined,
+		labelMatch: "all" as const,
+		milestone: options.milestone,
+	};
+
+	for (const entry of entries) {
+		if (entry.error) {
+			errors.push({ workspaceId: entry.id, error: entry.error });
+			continue;
+		}
+		const core = new Core(entry.rootPath);
+		try {
+			const tasks = applyTaskFilters(await core.queryTasks({ includeCrossBranch: false }), filter);
+			const listItems = await loadTaskListItems(core, tasks);
+			rows.push(...listItems.map((task) => ({ ...task, workspaceId: entry.id })));
+		} catch (error) {
+			errors.push({ workspaceId: entry.id, error: error instanceof Error ? error.message : String(error) });
+		} finally {
+			core.disposeSearchService();
+			core.disposeContentStore();
+		}
+	}
+
+	const sorted = sortTasks(rows, options.sort, undefined);
+	const limited = options.limit === undefined ? sorted : sorted.slice(0, Number(options.limit));
+	const page = selectListWindow(limited, listWindow);
+	if (outputMode === "json") {
+		const projected = taskListJson(page.items, page);
+		printJson({
+			...projected,
+			tasks: projected.tasks.map((task, index) => ({ ...task, workspaceId: page.items[index]?.workspaceId })),
+			workspaces: entries.map(({ id, name, rootPath }) => ({ id, name, rootPath })),
+			errors,
+		});
+		return;
+	}
+	printListWindow(page.items, listWindow, (windowTasks) => {
+		for (const task of windowTasks) process.stdout.write(`[${task.workspaceId}] ${formatPlainTaskListRow(task)}\n`);
+		for (const error of errors) process.stdout.write(`[${error.workspaceId}] ERROR: ${error.error}\n`);
+	});
+}
+
 function printTaskSections(tasks: Task[], sortField: string | undefined, statuses: string[]): void {
 	// Use the stdout stream, as JSON output does, so pending pipe writes keep the CLI alive.
 	for (const section of sectionTasks(tasks, sortField, statuses)) {
@@ -2633,6 +2723,14 @@ async function runTaskList(
 	const listOutput = resolveListOutput({ ...options, ...taskReadOptions(options) }, taskListCommand);
 	if (!listOutput) return;
 	const { outputMode, listWindow } = listOutput;
+	if (
+		(program.opts() as { allWorkspaces?: boolean }).allWorkspaces ||
+		taskCmd.opts().allWorkspaces ||
+		taskListCommand.opts().allWorkspaces
+	) {
+		await runAllWorkspaceTaskList(options, outputMode, listWindow);
+		return;
+	}
 	const cwd = await requireProjectRoot();
 	const core = new Core(cwd);
 	const hasDuplicateIds = await printDuplicateIntegrityWarning(core);
@@ -3005,6 +3103,8 @@ const taskListCommand = addHelpSchema(taskCmd.command("list"), {
 		'backlog task list --status "<todo status>" --count',
 	],
 })
+	.option("--workspace <id>", "target a registered directory workspace; distinct from task --project")
+	.option("--all-workspaces", "query all registered directory workspaces; writes require --workspace")
 	.description("list tasks grouped by status")
 	.option(
 		"-s, --status <status>",
@@ -4602,15 +4702,71 @@ function addBoardOptions(cmd: Command) {
 	return cmd
 		.option("-l, --layout <layout>", "board layout (horizontal|vertical)", "horizontal")
 		.option("--vertical", "use vertical layout (shortcut for --layout vertical)")
-		.option("-m, --milestones", "group tasks by milestone");
+		.option("-m, --milestones", "group tasks by milestone")
+		.option("--workspace <id>", "target a registered directory workspace")
+		.option("--all-workspaces", "show tasks from all registered directory workspaces")
+		.option("--plain", "print a stable non-interactive board")
+		.option("--json", "print a stable JSON board snapshot");
 }
 
-async function handleBoardView(options: { layout?: string; vertical?: boolean; milestones?: boolean }) {
-	const cwd = await requireProjectRoot();
-	const core = new Core(cwd);
-	const config = await core.filesystem.loadConfig();
-
-	const statuses = config?.statuses || [];
+async function handleBoardView(options: {
+	layout?: string;
+	vertical?: boolean;
+	milestones?: boolean;
+	workspace?: string;
+	allWorkspaces?: boolean;
+	plain?: boolean;
+	json?: boolean;
+}) {
+	const inherited = program.opts<{ workspace?: string; allWorkspaces?: boolean }>();
+	const workspace = options.workspace ?? inherited.workspace;
+	const allWorkspaces = options.allWorkspaces ?? inherited.allWorkspaces;
+	const currentRoot = workspace || allWorkspaces ? process.cwd() : await requireProjectRoot();
+	const entries = await listQueryWorkspaces();
+	const selected = workspace ? entries.find((entry) => entry.id === workspace) : undefined;
+	if (workspace && !selected) throw new Error(`Workspace not found: ${workspace}`);
+	if (selected?.error) throw new Error(`Workspace ${selected.id} is unavailable: ${selected.error}`);
+	const currentEntry = entries.find((entry) => entry.rootPath.toLowerCase() === currentRoot.toLowerCase());
+	const roots = allWorkspaces
+		? entries.filter((entry) => !entry.error)
+		: [selected ?? currentEntry ?? { id: "current", name: "Current project", rootPath: currentRoot, writable: true }];
+	if (allWorkspaces && roots.length === 0) throw new Error("No registered directory workspaces are available.");
+	const loaded = await Promise.all(
+		roots.map(async (entry) => {
+			const root = entry.rootPath;
+			const workspaceCore = new Core(root);
+			const config = await workspaceCore.filesystem.loadConfig();
+			const tasks = await workspaceCore.loadTasks();
+			return { entry, core: workspaceCore, config, tasks: tasks.map((task) => ({ ...task, workspaceId: entry.id })) };
+		}),
+	);
+	let activeWorkspaceId = workspace ?? (allWorkspaces ? undefined : loaded[0]?.entry.id);
+	const cwd = loaded[0]?.entry.rootPath ?? currentRoot;
+	const core = loaded[0]?.core ?? new Core(cwd);
+	const statuses = Array.from(new Set(loaded.flatMap(({ config: item }) => item?.statuses || [])));
+	const boardTasks = loaded.flatMap(({ tasks }) => tasks);
+	const scopes = loaded.map(({ entry, tasks, config }) => ({
+		id: entry.id,
+		name: entry.name,
+		writable: entry.writable,
+		tasks,
+		statuses: config?.statuses || ["To Do", "In Progress", "Done"],
+	}));
+	const registeredTargetAtLoad = new Set(
+		loaded
+			.filter(({ entry }) => entries.some((candidate) => candidate.id === entry.id && !candidate.error))
+			.map(({ entry }) => entry.id),
+	);
+	const workspaceForTask = (task: Task): (typeof loaded)[number] | undefined => {
+		const workspaceId = (task as Task & { workspaceId?: string }).workspaceId;
+		return loaded.find(({ entry }) => entry.id === (workspaceId ?? activeWorkspaceId));
+	};
+	if (options.json) {
+		process.stdout.write(
+			`${JSON.stringify({ tasks: boardTasks, statuses, workspaces: loaded.map(({ entry }) => ({ id: entry.id, name: entry.name, writable: entry.writable })) })}\n`,
+		);
+		return;
+	}
 
 	// Use unified view for Tab switching support
 	const { runUnifiedView } = await import("./ui/unified-view.ts");
@@ -4618,7 +4774,80 @@ async function handleBoardView(options: { layout?: string; vertical?: boolean; m
 		core,
 		initialView: "kanban",
 		milestoneMode: options.milestones,
+		readOnly: Boolean(selected?.writable === false),
+		workspaceId: activeWorkspaceId,
+		getWorkspaceId: () => activeWorkspaceId,
+		workspaceCores: new Map(loaded.map(({ entry, core: workspaceCore }) => [entry.id, workspaceCore])),
+		resolveTaskCore: (task) => workspaceForTask(task)?.core,
+		workspaceScopes: scopes,
+		onWorkspaceSwitch: (scope) => {
+			activeWorkspaceId = scope.id;
+		},
+		onOpenWorkflowInbox: async (screen) => {
+			const target = loaded.find(({ entry }) => entry.id === activeWorkspaceId);
+			if (!target) throw new Error("Choose a workspace with w before opening the human inbox.");
+			const workflow = (await target.core.filesystem.loadConfig())?.workflow;
+			const { openWorkflowInbox } = await import("./ui/workflow-inbox.ts");
+			await openWorkflowInbox({
+				screen,
+				options: {
+					root: target.entry.rootPath,
+					enabled: workflow?.enabled ?? false,
+					rq: workflow?.rqPath,
+					pythonPath: workflow?.pythonPath,
+					writable: target.entry.writable,
+					assertWritable: async () => {
+						const current = (await listQueryWorkspaces()).find(({ id }) => id === target.entry.id);
+						if (registeredTargetAtLoad.has(target.entry.id)) {
+							if (!current) throw new Error(`Workspace ${target.entry.id} is no longer registered.`);
+							if (current.rootPath.toLowerCase() !== target.entry.rootPath.toLowerCase())
+								throw new Error(`Workspace ${target.entry.id} was retargeted; reopen the workspace.`);
+							if (current.error) throw new Error(`Workspace ${target.entry.id} is unavailable: ${current.error}`);
+							assertWorkspaceWritable(current, "workflow inbox mutation");
+							return;
+						}
+						const currentRoot = (await listQueryWorkspaces()).find(
+							(candidate) => candidate.rootPath.toLowerCase() === target.entry.rootPath.toLowerCase(),
+						);
+						if (currentRoot) {
+							if (currentRoot.error)
+								throw new Error(`Workspace ${currentRoot.id} is unavailable: ${currentRoot.error}`);
+							assertWorkspaceWritable(currentRoot, "workflow inbox mutation");
+						}
+					},
+				},
+			});
+		},
+		createTask: async (input) => {
+			const target = loaded.find(({ entry }) => entry.id === activeWorkspaceId);
+			if (!target) throw new Error("Choose a workspace with w before creating a task from the aggregate board.");
+			if (!target.entry.writable) throw new Error(`Workspace ${target.entry.id} is read-only.`);
+			const targetConfig = await target.core.filesystem.loadConfig();
+			return (await target.core.createTaskFromInput(input, targetConfig?.autoCommit ?? false)).task;
+		},
+		editTask: async (task, screen) => {
+			const target = workspaceForTask(task);
+			if (!target) throw new Error("The task's workspace is unavailable.");
+			if (!target.entry.writable) return { reason: "read_only", task } as Awaited<ReturnType<Core["editTaskInTui"]>>;
+			return target.core.editTaskInTui(task.id, screen, task);
+		},
+		moveTask: async (task, input) => {
+			const target = workspaceForTask(task);
+			if (!target) throw new Error("The task's workspace is unavailable.");
+			if (!target.entry.writable) throw new Error(`Workspace ${target.entry.id} is read-only.`);
+			const config = await target.core.filesystem.loadConfig();
+			const workspaceTasks = target.tasks.map((candidate) => candidate.id);
+			return target.core.moveTasksToStatus({
+				taskIds: input.taskIds,
+				targetStatus: input.targetStatus,
+				orderedTaskIds: input.orderedTaskIds.filter((id) => workspaceTasks.includes(id)),
+				autoCommit: config?.autoCommit ?? false,
+			});
+		},
+		preloadedKanbanData: { tasks: boardTasks, statuses },
+		tasks: boardTasks,
 		tasksLoader: async (updateProgress) => {
+			if (allWorkspaces || workspace) return { tasks: boardTasks, statuses };
 			const [tasks, milestoneEntities, archivedMilestones] = await Promise.all([
 				core.loadTasks((msg) => {
 					updateProgress(msg);
@@ -6169,6 +6398,10 @@ registerInstructionsCommand(program);
 
 // MCP command group
 registerMcpCommand(program);
+
+// Registered project roots; distinct from task-level --project categories.
+registerWorkspaceCommand(program);
+registerWorkflowCommand(program);
 
 program
 	.parseAsync(process.argv)

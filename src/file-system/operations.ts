@@ -376,6 +376,20 @@ export interface DraftFileReference {
 	canonicalId: string;
 }
 
+function parseConfigScalar(value: string): string {
+	const trimmed = value.trim();
+	if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+		try {
+			const parsed = JSON.parse(trimmed);
+			if (typeof parsed === "string") return parsed;
+		} catch {
+			// Preserve the existing scalar parser's behavior for malformed values.
+		}
+	}
+	if (trimmed.startsWith("'") && trimmed.endsWith("'")) return trimmed.slice(1, -1);
+	return trimmed;
+}
+
 export class DraftParseError extends Error {
 	constructor(filename: string) {
 		super(`Draft file ${filename} could not be parsed. Repair or remove the file, then rerun the edit.`);
@@ -2466,6 +2480,17 @@ ${description || `Milestone: ${title}`}`,
 				case "backlogDirectory":
 					config.backlogDirectory = value.replace(/['"]/g, "");
 					break;
+				case "workflow_enabled":
+					if (value.toLowerCase() !== "true" && value.toLowerCase() !== "false")
+						throw new Error(`workflow_enabled must be true or false in ${this.resolvedConfigPath}.`);
+					config.workflow = { ...(config.workflow ?? { enabled: false }), enabled: value.toLowerCase() === "true" };
+					break;
+				case "workflow_rq_path":
+					config.workflow = { ...(config.workflow ?? { enabled: false }), rqPath: parseConfigScalar(value) };
+					break;
+				case "workflow_python_path":
+					config.workflow = { ...(config.workflow ?? { enabled: false }), pythonPath: parseConfigScalar(value) };
+					break;
 			}
 		}
 
@@ -2495,6 +2520,7 @@ ${description || `Milestone: ${title}`}`,
 			activeBranchDays: config.activeBranchDays,
 			onStatusChange: config.onStatusChange,
 			prefixes: config.prefixes,
+			workflow: config.workflow,
 			backlogDirectory: config.backlogDirectory,
 		};
 	}
@@ -2538,6 +2564,15 @@ ${description || `Milestone: ${title}`}`,
 			...(config.onStatusChange ? [`onStatusChange: '${config.onStatusChange}'`] : []),
 			...(config.prefixes?.task ? [`task_prefix: "${config.prefixes.task}"`] : []),
 			...(config.backlogDirectory ? [`backlog_directory: "${config.backlogDirectory}"`] : []),
+			...(config.workflow
+				? [
+						`workflow_enabled: ${config.workflow.enabled}`,
+						...(config.workflow.rqPath ? [`workflow_rq_path: ${JSON.stringify(config.workflow.rqPath)}`] : []),
+						...(config.workflow.pythonPath
+							? [`workflow_python_path: ${JSON.stringify(config.workflow.pythonPath)}`]
+							: []),
+					]
+				: []),
 		];
 
 		return `${lines.join("\n")}\n`;

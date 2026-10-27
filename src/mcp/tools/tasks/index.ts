@@ -19,6 +19,12 @@ export function registerTaskTools(server: McpServer, config: BacklogConfig): voi
 	const taskEditSchema = generateTaskEditSchema(config);
 	const taskListSchema = generateTaskListSchema(config);
 	const taskSearchSchema = generateTaskSearchSchema(config);
+	for (const schema of [taskCreateSchema, taskListSchema, taskSearchSchema, taskEditSchema]) {
+		schema.properties = {
+			...schema.properties,
+			workspaceId: { type: "string", description: "Registered directory workspace identity." },
+		};
+	}
 
 	const createTaskTool: McpToolHandler = createSimpleValidatedTool(
 		{

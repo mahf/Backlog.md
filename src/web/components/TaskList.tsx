@@ -1,28 +1,26 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import type React from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { apiClient } from "../lib/api";
-import type {
-	Milestone,
-	Task,
-	TaskSearchResult,
-} from "../../types";
 import { DEFAULT_STATUSES } from "../../constants/index.ts";
+import type { Milestone, Task, TaskSearchResult } from "../../types";
 import { collectAvailableLabels } from "../../utils/label-filter.ts";
-import { compareTaskIds, compareTaskIdsDescending, sortTasks } from "../../utils/task-sorting.ts";
-import { isTerminalStatus } from "../../utils/terminal-status.ts";
-import { collectArchivedMilestoneKeys, getMilestoneLabel, milestoneKey } from "../utils/milestones";
-import { parseStoredUtcDate } from "../../utils/utc-timestamp.ts";
 import {
 	formatPriorityLabel,
 	getPriorityOptions,
 	getPriorityRank,
 	resolvePriorityValue,
 } from "../../utils/priority-config.ts";
-import CleanupModal from "./CleanupModal";
-import StoredDate from "./StoredDate";
+import { compareTaskIds, compareTaskIdsDescending, sortTasks } from "../../utils/task-sorting.ts";
+import { isTerminalStatus } from "../../utils/terminal-status.ts";
+import { parseStoredUtcDate } from "../../utils/utc-timestamp.ts";
+import { apiClient } from "../lib/api";
+import { collectArchivedMilestoneKeys, getMilestoneLabel, milestoneKey } from "../utils/milestones";
 import AcceptanceCriteriaProgress, { getAcceptanceCriteriaProgressCounts } from "./AcceptanceCriteriaProgress";
+import CleanupModal from "./CleanupModal";
 import LabelFilterDropdown from "./LabelFilterDropdown";
+import StoredDate from "./StoredDate";
 import { SuccessToast } from "./SuccessToast";
+import WorkspaceBadge from "./WorkspaceBadge";
 
 interface TaskListProps {
 	onEditTask: (task: Task) => void;
@@ -37,6 +35,7 @@ interface TaskListProps {
 	onRefreshData?: () => Promise<void>;
 	dateFormat?: string;
 	isLoading?: boolean;
+	readOnly?: boolean;
 }
 
 type TaskSortColumn = "id" | "title" | "status" | "priority" | "ordinal" | "milestone" | "created";
@@ -132,6 +131,7 @@ const TaskList: React.FC<TaskListProps> = ({
 	onRefreshData,
 	dateFormat,
 	isLoading = false,
+	readOnly = false,
 }) => {
 	const [searchParams, setSearchParams] = useSearchParams();
 	const statusOptions = useMemo(
@@ -241,7 +241,7 @@ const TaskList: React.FC<TaskListProps> = ({
 			if (!title) continue;
 			const titleKey = title.toLowerCase();
 			activeTitleCounts.set(titleKey, (activeTitleCounts.get(titleKey) ?? 0) + 1);
-		};
+		}
 		const activeTitleKeys = new Set(activeTitleCounts.keys());
 		for (const milestone of milestoneEntities ?? []) {
 			const id = milestone.id.trim();
@@ -283,7 +283,8 @@ const TaskList: React.FC<TaskListProps> = ({
 		return aliasMap;
 	}, [milestoneEntities, archivedMilestones]);
 	const archivedMilestoneKeys = useMemo(
-		() => new Set(collectArchivedMilestoneKeys(archivedMilestones, milestoneEntities).map((value) => milestoneKey(value))),
+		() =>
+			new Set(collectArchivedMilestoneKeys(archivedMilestones, milestoneEntities).map((value) => milestoneKey(value))),
 		[archivedMilestones, milestoneEntities],
 	);
 	const canonicalizeMilestone = (value?: string | null): string => {
@@ -297,20 +298,21 @@ const TaskList: React.FC<TaskListProps> = ({
 		const idMatch = normalized.match(/^m-(\d+)$/i);
 		if (idMatch?.[1]) {
 			const numericAlias = String(Number.parseInt(idMatch[1], 10));
-			return milestoneAliasToCanonical.get(`m-${numericAlias}`) ?? milestoneAliasToCanonical.get(numericAlias) ?? normalized;
+			return (
+				milestoneAliasToCanonical.get(`m-${numericAlias}`) ?? milestoneAliasToCanonical.get(numericAlias) ?? normalized
+			);
 		}
 		if (/^\d+$/.test(normalized)) {
 			const numericAlias = String(Number.parseInt(normalized, 10));
-			return milestoneAliasToCanonical.get(`m-${numericAlias}`) ?? milestoneAliasToCanonical.get(numericAlias) ?? normalized;
+			return (
+				milestoneAliasToCanonical.get(`m-${numericAlias}`) ?? milestoneAliasToCanonical.get(numericAlias) ?? normalized
+			);
 		}
 		return normalized;
 	};
 
 	const sortedBaseTasks = useMemo(() => sortTasksByIdDescending(tasks), [tasks]);
-	const mergedAvailableLabels = useMemo(
-		() => collectAvailableLabels(tasks, availableLabels),
-		[tasks, availableLabels],
-	);
+	const mergedAvailableLabels = useMemo(() => collectAvailableLabels(tasks, availableLabels), [tasks, availableLabels]);
 	const milestoneOptions = useMemo(() => {
 		const uniqueMilestones = Array.from(new Set([...availableMilestones.map((m) => m.trim()).filter(Boolean)]));
 		return uniqueMilestones;
@@ -397,10 +399,7 @@ const TaskList: React.FC<TaskListProps> = ({
 		};
 
 		const shouldUseApi =
-			statusFilter.length > 0 ||
-			excludedStatusFilter.length > 0 ||
-			Boolean(priorityFilter) ||
-			labelFilter.length > 0;
+			statusFilter.length > 0 || excludedStatusFilter.length > 0 || Boolean(priorityFilter) || labelFilter.length > 0;
 
 		if (!hasActiveFilters) {
 			return;
@@ -730,36 +729,37 @@ const TaskList: React.FC<TaskListProps> = ({
 		<div className="page-shell transition-colors duration-200">
 			<div className="flex flex-col gap-4 mb-6">
 				<div className="flex items-center justify-between gap-3">
-						<h1 className="text-2xl font-bold text-gray-900 dark:text-white">All Tasks</h1>
-						<button
-							className="inline-flex items-center px-4 py-2 bg-blue-500 text-white text-sm font-medium rounded-md hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-400 dark:focus:ring-offset-gray-900 transition-colors duration-200"
-							onClick={onNewTask}
-						>
-							+ New Task
+					<h1 className="text-2xl font-bold text-gray-900 dark:text-white">All Tasks</h1>
+					<button
+						className="inline-flex items-center px-4 py-2 bg-blue-500 text-white text-sm font-medium rounded-md hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-400 dark:focus:ring-offset-gray-900 transition-colors duration-200"
+						onClick={onNewTask}
+						disabled={readOnly}
+					>
+						+ New Task
 					</button>
 				</div>
 
 				<div className="flex flex-wrap items-center gap-3 justify-between">
-						<div className="flex flex-wrap items-center gap-3 flex-1 min-w-0">
-							<LabelFilterDropdown
-								availableLabels={statusOptions}
-								selectedLabels={statusFilter}
-								onChange={handleStatusChange}
-								menuId="task-list-status-menu"
-								label="Status"
-								emptyLabel="All"
-								noOptionsLabel="No statuses"
-								clearLabel="Clear status filter"
-								className="min-w-[180px]"
-							/>
+					<div className="flex flex-wrap items-center gap-3 flex-1 min-w-0">
+						<LabelFilterDropdown
+							availableLabels={statusOptions}
+							selectedLabels={statusFilter}
+							onChange={handleStatusChange}
+							menuId="task-list-status-menu"
+							label="Status"
+							emptyLabel="All"
+							noOptionsLabel="No statuses"
+							clearLabel="Clear status filter"
+							className="min-w-[180px]"
+						/>
 
-							<LabelFilterDropdown
-								availableLabels={statusOptions}
-								selectedLabels={excludedStatusFilter}
-								onChange={handleExcludeStatusChange}
-								menuId="task-list-exclude-status-menu"
-								label="Exclude status"
-								emptyLabel="None"
+						<LabelFilterDropdown
+							availableLabels={statusOptions}
+							selectedLabels={excludedStatusFilter}
+							onChange={handleExcludeStatusChange}
+							menuId="task-list-exclude-status-menu"
+							label="Exclude status"
+							emptyLabel="None"
 							noOptionsLabel="No statuses"
 							clearLabel="Clear excluded statuses"
 							className="min-w-[210px]"
@@ -797,33 +797,43 @@ const TaskList: React.FC<TaskListProps> = ({
 							onChange={handleLabelChange}
 							menuId="task-list-labels-menu"
 						/>
-
 					</div>
 
 					<div className="flex items-center gap-3 flex-shrink-0">
 						{isFilteringTerminalStatus && currentCount > 0 && (
-								<button
-									type="button"
-									onClick={() => setShowCleanupModal(true)}
-									className="py-2 px-3 text-sm border border-gray-300 dark:border-gray-600 rounded-lg text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-200 flex items-center gap-2 whitespace-nowrap"
-									title="Clean up old completed tasks"
+							<button
+								type="button"
+								onClick={() => setShowCleanupModal(true)}
+								className="py-2 px-3 text-sm border border-gray-300 dark:border-gray-600 rounded-lg text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-200 flex items-center gap-2 whitespace-nowrap"
+								title="Clean up old completed tasks"
+							>
+								<svg
+									className="w-4 h-4"
+									fill="none"
+									stroke="currentColor"
+									viewBox="0 0 24 24"
+									xmlns="http://www.w3.org/2000/svg"
 								>
-									<svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-										<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+									<path
+										strokeLinecap="round"
+										strokeLinejoin="round"
+										strokeWidth={2}
+										d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+									/>
 								</svg>
 								Clean Up
 							</button>
 						)}
 
-							{hasActiveFilters && (
-								<button
-									type="button"
-									onClick={handleClearFilters}
-									className="py-2 px-3 text-sm border border-gray-300 dark:border-gray-600 rounded-lg whitespace-nowrap transition-colors duration-200 text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700"
-								>
-									Clear filters
-								</button>
-							)}
+						{hasActiveFilters && (
+							<button
+								type="button"
+								onClick={handleClearFilters}
+								className="py-2 px-3 text-sm border border-gray-300 dark:border-gray-600 rounded-lg whitespace-nowrap transition-colors duration-200 text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700"
+							>
+								Clear filters
+							</button>
+						)}
 
 						<div className="text-sm text-gray-600 dark:text-gray-300 whitespace-nowrap text-right min-w-[170px]">
 							Showing {currentCount} of {totalTasks} tasks
@@ -840,8 +850,18 @@ const TaskList: React.FC<TaskListProps> = ({
 
 			{currentCount === 0 ? (
 				<div className="text-center py-12">
-					<svg className="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+					<svg
+						className="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500"
+						fill="none"
+						stroke="currentColor"
+						viewBox="0 0 24 24"
+					>
+						<path
+							strokeLinecap="round"
+							strokeLinejoin="round"
+							strokeWidth={2}
+							d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"
+						/>
 					</svg>
 					<h3 className="mt-2 text-sm font-medium text-gray-900 dark:text-white">
 						{hasActiveFilters ? "No tasks match the current filters" : "No tasks"}
@@ -856,7 +876,10 @@ const TaskList: React.FC<TaskListProps> = ({
 				<div className="rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
 					<div className="sticky top-0 z-10 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-700/95 backdrop-blur supports-[backdrop-filter]:bg-gray-50/90 supports-[backdrop-filter]:dark:bg-gray-700/85">
 						<div ref={tableHeaderScrollRef} className="overflow-x-auto" style={{ overflowY: "hidden" }}>
-							<table className="w-full table-fixed border-collapse" style={{ minWidth: `${TASK_TABLE_MIN_WIDTH_REM}rem` }}>
+							<table
+								className="w-full table-fixed border-collapse"
+								style={{ minWidth: `${TASK_TABLE_MIN_WIDTH_REM}rem` }}
+							>
 								{renderColumnGroup()}
 								<thead>
 									<tr className="text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-300">
@@ -875,7 +898,10 @@ const TaskList: React.FC<TaskListProps> = ({
 						</div>
 					</div>
 					<div ref={tableBodyScrollRef} className="overflow-x-auto" style={{ overflowY: "hidden" }}>
-						<table className="w-full table-fixed border-collapse" style={{ minWidth: `${TASK_TABLE_MIN_WIDTH_REM}rem` }}>
+						<table
+							className="w-full table-fixed border-collapse"
+							style={{ minWidth: `${TASK_TABLE_MIN_WIDTH_REM}rem` }}
+						>
 							{renderColumnGroup()}
 							<tbody className="divide-y divide-gray-200 dark:divide-gray-700">
 								{sortedDisplayTasks.map((task) => {
@@ -888,7 +914,7 @@ const TaskList: React.FC<TaskListProps> = ({
 
 									return (
 										<tr
-											key={task.id}
+											key={`${(task as Task & { workspaceId?: string }).workspaceId ?? "local"}:${task.id}`}
 											onClick={() => onEditTask(task)}
 											className={`cursor-pointer transition-colors ${
 												isFromOtherBranch
@@ -897,12 +923,18 @@ const TaskList: React.FC<TaskListProps> = ({
 											}`}
 										>
 											<td className="px-3 py-2.5 text-xs font-mono text-gray-500 dark:text-gray-400 whitespace-nowrap">
-												{task.id}
+												<div className="flex flex-wrap items-center gap-1">
+													<span>{task.id}</span>
+													<WorkspaceBadge task={task} />
+												</div>
 											</td>
 											<td className="px-3 py-2.5">
 												<div className="flex items-center gap-2 min-w-0">
 													{progressSlotDigits > 0 && (
-														<span className="flex min-w-12 shrink-0 text-[10px] font-medium tabular-nums" style={{ width: progressSlotWidth }}>
+														<span
+															className="flex min-w-12 shrink-0 text-[10px] font-medium tabular-nums"
+															style={{ width: progressSlotWidth }}
+														>
 															<AcceptanceCriteriaProgress task={task} density="list" />
 														</span>
 													)}
@@ -938,7 +970,9 @@ const TaskList: React.FC<TaskListProps> = ({
 												)}
 											</td>
 											<td className="px-3 py-2.5">
-												<span className={`inline-flex rounded-circle px-2 py-0.5 text-[11px] font-medium ${getStatusColor(task.status)}`}>
+												<span
+													className={`inline-flex rounded-circle px-2 py-0.5 text-[11px] font-medium ${getStatusColor(task.status)}`}
+												>
 													{task.status}
 												</span>
 											</td>
@@ -954,7 +988,11 @@ const TaskList: React.FC<TaskListProps> = ({
 												)}
 											</td>
 											<td className="px-3 py-2.5 text-xs font-mono text-gray-500 dark:text-gray-400 whitespace-nowrap">
-												{task.ordinal !== undefined ? task.ordinal : <span className="text-gray-300 dark:text-gray-600">—</span>}
+												{task.ordinal !== undefined ? (
+													task.ordinal
+												) : (
+													<span className="text-gray-300 dark:text-gray-600">—</span>
+												)}
 											</td>
 											<td className="px-3 py-2.5">
 												{visibleLabels.length > 0 ? (
@@ -996,7 +1034,10 @@ const TaskList: React.FC<TaskListProps> = ({
 													<span className="text-xs text-gray-300 dark:text-gray-600">—</span>
 												)}
 											</td>
-											<td className="px-3 py-2.5 text-xs text-gray-600 dark:text-gray-300 truncate" title={milestoneLabel}>
+											<td
+												className="px-3 py-2.5 text-xs text-gray-600 dark:text-gray-300 truncate"
+												title={milestoneLabel}
+											>
 												{milestoneLabel}
 											</td>
 											<td className="px-3 py-2.5 text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
@@ -1026,7 +1067,12 @@ const TaskList: React.FC<TaskListProps> = ({
 					onDismiss={() => setCleanupSuccessMessage(null)}
 					icon={
 						<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+							<path
+								strokeLinecap="round"
+								strokeLinejoin="round"
+								strokeWidth={2}
+								d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+							/>
 						</svg>
 					}
 				/>

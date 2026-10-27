@@ -1,5 +1,6 @@
+import { lstat, open, realpath } from "node:fs/promises";
 import net from "node:net";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { DEFAULT_STATUSES } from "../constants/index.ts";
 import { CONTENT_RECORD_WORDS, Core, formatCleanupResult, RecordRefusedError } from "../core/backlog.ts";
@@ -8,6 +9,8 @@ import { initializeProject } from "../core/init.ts";
 import type { SearchService } from "../core/search-service.ts";
 import { getTaskStatistics } from "../core/statistics.ts";
 import { loadTaskDetail } from "../core/task-detail.ts";
+import { runWorkflow, type WorkflowCommandResult, type WorkflowOptions } from "../core/workflow-adapter.ts";
+import { listWorkspaces } from "../core/workspace-registry.ts";
 import { isCreateLockError, isTaskLockError } from "../file-system/operations.ts";
 import { BacklogToolError } from "../mcp/errors/mcp-errors.ts";
 import { MilestoneHandlers } from "../mcp/tools/milestones/handlers.ts";
@@ -37,6 +40,7 @@ import { formatValidStatuses, getCanonicalStatuses, getValidStatuses } from "../
 import { isValidTaskId } from "../utils/task-id.ts";
 import { isAmbiguousTaskIdError, LOCAL_TASK_LOOKUP_HINT, taskNotFoundMessage } from "../utils/task-path.ts";
 import { getVersion } from "../utils/version.ts";
+import { WorkspaceQueryCache } from "./workspace-query-cache.ts";
 
 // Regex pattern to match any prefix (letters followed by dash)
 const PREFIX_PATTERN = /^[a-zA-Z]+-/i;
@@ -260,7 +264,14 @@ export class BacklogServer {
 	private unsubscribeContentStore?: () => void;
 	private taskBroadcastTimer?: ReturnType<typeof setTimeout>;
 	private pendingDataBroadcastScope: "tasks" | "milestones" = "tasks";
+	private pendingDataBroadcastWorkspaceId?: string;
+	private readonly pendingDataBroadcastWorkspaceIds = new Set<string>();
+	private pendingDataBroadcastAllWorkspaces = false;
+	private parentServer?: BacklogServer;
+	private parentWorkspaceId?: string;
 	private storeReadyBroadcasted = false;
+	private readonly workspaceServers = new Map<string, BacklogServer>();
+	private readonly workflowSnapshotCache = new WorkspaceQueryCache<WorkflowCommandResult>();
 
 	constructor(projectPath: string) {
 		this.core = new Core(projectPath, { enableWatchers: true });
@@ -272,6 +283,100 @@ export class BacklogServer {
 			this.core.filesystem.listArchivedMilestones(),
 		]);
 		return resolveMilestoneInputForStorage(milestone, activeMilestones, archivedMilestones);
+	}
+
+	private async validateWorkspaceTarget(value: unknown): Promise<Response | undefined> {
+		if (value === undefined) return undefined;
+		if (typeof value !== "string" || value.trim() === "") {
+			return Response.json({ error: "workspaceId must be a nonblank registered workspace id." }, { status: 400 });
+		}
+		const entry = (await listWorkspaces()).find((candidate) => candidate.id === value);
+		if (!entry) return Response.json({ error: `Workspace not found: ${value}` }, { status: 404 });
+		if (entry.error) return Response.json({ error: `Workspace unavailable: ${entry.error}` }, { status: 409 });
+		if (entry.rootPath !== this.core.filesystem.rootDir) {
+			return Response.json({ error: "workspaceId does not match this server project." }, { status: 409 });
+		}
+		if (!entry.writable) return Response.json({ error: `Workspace ${entry.id} is read-only.` }, { status: 403 });
+		return undefined;
+	}
+
+	private async routeApi<T extends Request>(
+		request: T,
+		callback: (server: BacklogServer, request: T) => Promise<Response>,
+	): Promise<Response> {
+		const url = new URL(request.url);
+		const mutating = request.method !== "GET" && request.method !== "HEAD";
+		let requestedId = url.searchParams.get("workspace") || undefined;
+		const aggregate = url.searchParams.get("allWorkspaces") === "true";
+		const entries = await listWorkspaces();
+		for (const [id, routed] of this.workspaceServers) {
+			const entry = entries.find((candidate) => candidate.id === id);
+			if (!entry || entry.error || entry.rootPath !== routed.core.filesystem.rootDir) {
+				await routed.stop();
+				this.workspaceServers.delete(id);
+				this.workflowSnapshotCache.dispose(routed.core.filesystem.rootDir);
+			}
+		}
+		if (aggregate && mutating) {
+			return Response.json({ error: "Aggregate workspace mutations require an explicit workspace." }, { status: 409 });
+		}
+		const queryEntry = requestedId ? entries.find((candidate) => candidate.id === requestedId) : undefined;
+		if (requestedId && !queryEntry)
+			return Response.json({ error: `Workspace not found: ${requestedId}` }, { status: 404 });
+		if (queryEntry?.error)
+			return Response.json({ error: `Workspace unavailable: ${queryEntry.error}` }, { status: 409 });
+		if (queryEntry && mutating && !queryEntry.writable) {
+			return Response.json({ error: `Workspace ${queryEntry.id} is read-only.` }, { status: 403 });
+		}
+		let body: unknown;
+		let rawBody: ArrayBuffer | undefined;
+		if (mutating && request.body) {
+			try {
+				rawBody = await request.clone().arrayBuffer();
+				body = JSON.parse(new TextDecoder().decode(rawBody));
+				const bodyId =
+					typeof body === "object" && body !== null ? (body as { workspaceId?: unknown }).workspaceId : undefined;
+				if (bodyId !== undefined) {
+					if (typeof bodyId !== "string" || !bodyId.trim())
+						return Response.json({ error: "Invalid workspaceId" }, { status: 400 });
+					if (requestedId && requestedId !== bodyId)
+						return Response.json({ error: "workspaceId contradicts query workspace" }, { status: 409 });
+					requestedId = bodyId;
+				}
+			} catch {
+				// Handlers retain responsibility for reporting malformed or empty JSON bodies.
+			}
+		}
+		let target: BacklogServer = this;
+		if (requestedId) {
+			const entry = entries.find((candidate) => candidate.id === requestedId);
+			if (!entry) return Response.json({ error: `Workspace not found: ${requestedId}` }, { status: 404 });
+			if (entry.error) return Response.json({ error: `Workspace unavailable: ${entry.error}` }, { status: 409 });
+			if (mutating && !entry.writable)
+				return Response.json({ error: `Workspace ${entry.id} is read-only.` }, { status: 403 });
+			if (entry.rootPath !== this.core.filesystem.rootDir) {
+				target = this.workspaceServers.get(entry.id) ?? new BacklogServer(entry.rootPath);
+				target.parentServer = this;
+				target.parentWorkspaceId = entry.id;
+				this.workspaceServers.set(entry.id, target);
+			}
+		} else if (mutating) {
+			const currentEntry = entries.find((entry) => entry.rootPath === this.core.filesystem.rootDir);
+			if (currentEntry?.error)
+				return Response.json({ error: `Workspace unavailable: ${currentEntry.error}` }, { status: 409 });
+			if (currentEntry && !currentEntry.writable)
+				return Response.json({ error: `Workspace ${currentEntry.id} is read-only.` }, { status: 403 });
+		}
+		url.searchParams.delete("workspace");
+		if (mutating) url.searchParams.delete("allWorkspaces");
+		const init: RequestInit = { method: request.method, headers: request.headers };
+		if (mutating && rawBody !== undefined) init.body = rawBody;
+		const routed = new Request(url, init) as T;
+		const params = (request as Request & { params?: unknown }).params;
+		if (params !== undefined) (routed as Request & { params?: unknown }).params = params;
+		const response = await callback(target, routed);
+		if (target !== this && mutating && requestedId) this.broadcastDataUpdated("tasks", requestedId);
+		return response;
 	}
 
 	private async ensureServicesReady(): Promise<void> {
@@ -347,15 +452,29 @@ export class BacklogServer {
 		return this.server?.port ?? null;
 	}
 
-	private broadcastDataUpdated(scope: "tasks" | "milestones" = "tasks") {
+	private broadcastDataUpdated(scope: "tasks" | "milestones" = "tasks", workspaceId?: string) {
 		// Milestone changes widen the message so clients also refetch milestone
 		// entities; the debounce keeps the widest scope seen in the window.
 		if (scope === "milestones") this.pendingDataBroadcastScope = "milestones";
+		if (workspaceId) {
+			this.pendingDataBroadcastWorkspaceIds.add(workspaceId);
+			this.pendingDataBroadcastWorkspaceId = workspaceId;
+		} else this.pendingDataBroadcastAllWorkspaces = true;
+		if (this.parentServer) this.parentServer.broadcastDataUpdated(scope, this.parentWorkspaceId);
 		if (this.taskBroadcastTimer) clearTimeout(this.taskBroadcastTimer);
 		this.taskBroadcastTimer = setTimeout(() => {
 			this.taskBroadcastTimer = undefined;
-			const message = this.pendingDataBroadcastScope === "milestones" ? "milestones-updated" : "tasks-updated";
+			const messageType = this.pendingDataBroadcastScope === "milestones" ? "milestones-updated" : "tasks-updated";
+			const message =
+				!this.pendingDataBroadcastAllWorkspaces &&
+				this.pendingDataBroadcastWorkspaceIds.size === 1 &&
+				this.pendingDataBroadcastWorkspaceId
+					? JSON.stringify({ type: messageType, workspaceId: this.pendingDataBroadcastWorkspaceId })
+					: messageType;
 			this.pendingDataBroadcastScope = "tasks";
+			this.pendingDataBroadcastWorkspaceId = undefined;
+			this.pendingDataBroadcastWorkspaceIds.clear();
+			this.pendingDataBroadcastAllWorkspaces = false;
 			for (const ws of this.sockets) {
 				try {
 					ws.send(message);
@@ -419,120 +538,196 @@ export class BacklogServer {
 					"/decisions/*": spaIndexHtml,
 					"/statistics": spaIndexHtml,
 					"/settings": spaIndexHtml,
+					"/human-inbox": spaIndexHtml,
+					"/human-inbox/*": spaIndexHtml,
+					"/workflow": spaIndexHtml,
+					"/workflow/*": spaIndexHtml,
 
 					// API Routes using Bun's native route syntax
+					"/api/workspaces": {
+						GET: async (req: Request) => await this.routeApi(req, (target) => target.handleListWorkspaces()),
+					},
+					"/api/workspaces/tasks": {
+						GET: async (req: Request) => await this.routeApi(req, (target) => target.handleListAllWorkspaceTasks()),
+					},
 					"/api/tasks": {
-						GET: async (req: Request) => await this.handleListTasks(req),
-						POST: async (req: Request) => await this.handleCreateTask(req),
+						GET: async (req: Request) => await this.routeApi(req, (target, routed) => target.handleListTasks(routed)),
+						POST: async (req: Request) => await this.routeApi(req, (target, routed) => target.handleCreateTask(routed)),
 					},
 					"/api/task/:id": {
-						GET: async (req: Request & { params: { id: string } }) => await this.handleGetTask(req.params.id),
+						GET: async (req: Request & { params: { id: string } }) =>
+							await this.routeApi(req, (target, routed) =>
+								target.handleGetTask(
+									(routed as typeof req).params.id,
+									new URL(req.url).searchParams.get("workspace") ?? undefined,
+								),
+							),
 					},
 					"/api/tasks/:id": {
-						GET: async (req: Request & { params: { id: string } }) => await this.handleGetTask(req.params.id),
-						PUT: async (req: Request & { params: { id: string } }) => await this.handleUpdateTask(req, req.params.id),
+						GET: async (req: Request & { params: { id: string } }) =>
+							await this.routeApi(req, (target, routed) =>
+								target.handleGetTask(
+									(routed as typeof req).params.id,
+									new URL(req.url).searchParams.get("workspace") ?? undefined,
+								),
+							),
+						PUT: async (req: Request & { params: { id: string } }) =>
+							await this.routeApi(req, (target, routed) =>
+								target.handleUpdateTask(routed, (routed as typeof req).params.id),
+							),
 					},
 					"/api/tasks/:id/archive": {
-						POST: async (req: Request & { params: { id: string } }) => await this.handleArchiveTask(req.params.id),
+						POST: async (req: Request & { params: { id: string } }) =>
+							await this.routeApi(req, (target, routed) => target.handleArchiveTask((routed as typeof req).params.id)),
 					},
 					"/api/tasks/:id/demote": {
-						POST: async (req: Request & { params: { id: string } }) => await this.handleDemoteTask(req.params.id),
+						POST: async (req: Request & { params: { id: string } }) =>
+							await this.routeApi(req, (target, routed) => target.handleDemoteTask((routed as typeof req).params.id)),
 					},
 					"/api/statuses": {
-						GET: async () => await this.handleGetStatuses(),
+						GET: async (req: Request) => await this.routeApi(req, (target) => target.handleGetStatuses()),
 					},
 					"/api/config": {
-						GET: async () => await this.handleGetConfig(),
-						PUT: async (req: Request) => await this.handleUpdateConfig(req),
+						GET: async (req: Request) => await this.routeApi(req, (target) => target.handleGetConfig()),
+						PUT: async (req: Request) =>
+							await this.routeApi(req, (target, routed) => target.handleUpdateConfig(routed)),
 					},
 					"/api/docs": {
-						GET: async () => await this.handleListDocs(),
-						POST: async (req: Request) => await this.handleCreateDoc(req),
+						GET: async (req: Request) => await this.routeApi(req, (target) => target.handleListDocs()),
+						POST: async (req: Request) => await this.routeApi(req, (target, routed) => target.handleCreateDoc(routed)),
 					},
 					"/api/doc/:id": {
-						GET: async (req: Request & { params: { id: string } }) => await this.handleGetDoc(req.params.id),
+						GET: async (req: Request & { params: { id: string } }) =>
+							await this.routeApi(req, (target, routed) => target.handleGetDoc((routed as typeof req).params.id)),
 					},
 					"/api/docs/:id": {
-						GET: async (req: Request & { params: { id: string } }) => await this.handleGetDoc(req.params.id),
-						PUT: async (req: Request & { params: { id: string } }) => await this.handleUpdateDoc(req, req.params.id),
+						GET: async (req: Request & { params: { id: string } }) =>
+							await this.routeApi(req, (target, routed) => target.handleGetDoc((routed as typeof req).params.id)),
+						PUT: async (req: Request & { params: { id: string } }) =>
+							await this.routeApi(req, (target, routed) =>
+								target.handleUpdateDoc(routed, (routed as typeof req).params.id),
+							),
 					},
 					"/api/docs/:id/archive": {
 						POST: async (req: Request & { params: { id: string } }) =>
-							await this.handleArchiveContentRecord("document", req.params.id),
+							await this.routeApi(req, (target, routed) =>
+								target.handleArchiveContentRecord("document", (routed as typeof req).params.id),
+							),
 					},
 					"/api/decisions": {
-						GET: async () => await this.handleListDecisions(),
-						POST: async (req: Request) => await this.handleCreateDecision(req),
+						GET: async (req: Request) => await this.routeApi(req, (target) => target.handleListDecisions()),
+						POST: async (req: Request) =>
+							await this.routeApi(req, (target, routed) => target.handleCreateDecision(routed)),
 					},
 					"/api/decision/:id": {
-						GET: async (req: Request & { params: { id: string } }) => await this.handleGetDecision(req.params.id),
+						GET: async (req: Request & { params: { id: string } }) =>
+							await this.routeApi(req, (target, routed) => target.handleGetDecision((routed as typeof req).params.id)),
 					},
 					"/api/decisions/:id": {
-						GET: async (req: Request & { params: { id: string } }) => await this.handleGetDecision(req.params.id),
+						GET: async (req: Request & { params: { id: string } }) =>
+							await this.routeApi(req, (target, routed) => target.handleGetDecision((routed as typeof req).params.id)),
 						PUT: async (req: Request & { params: { id: string } }) =>
-							await this.handleUpdateDecision(req, req.params.id),
+							await this.routeApi(req, (target, routed) =>
+								target.handleUpdateDecision(routed, (routed as typeof req).params.id),
+							),
 					},
 					"/api/decisions/:id/archive": {
 						POST: async (req: Request & { params: { id: string } }) =>
-							await this.handleArchiveContentRecord("decision", req.params.id),
+							await this.routeApi(req, (target, routed) =>
+								target.handleArchiveContentRecord("decision", (routed as typeof req).params.id),
+							),
 					},
 					"/api/drafts": {
-						GET: async () => await this.handleListDrafts(),
+						GET: async (req: Request) => await this.routeApi(req, (target) => target.handleListDrafts()),
 					},
 					"/api/drafts/:id/promote": {
-						POST: async (req: Request & { params: { id: string } }) => await this.handlePromoteDraft(req.params.id),
+						POST: async (req: Request & { params: { id: string } }) =>
+							await this.routeApi(req, (target, routed) => target.handlePromoteDraft((routed as typeof req).params.id)),
 					},
 					"/api/milestones": {
-						GET: async () => await this.handleListMilestones(),
-						POST: async (req: Request) => await this.handleCreateMilestone(req),
+						GET: async (req: Request) => await this.routeApi(req, (target) => target.handleListMilestones()),
+						POST: async (req: Request) =>
+							await this.routeApi(req, (target, routed) => target.handleCreateMilestone(routed)),
 					},
 					"/api/milestones/archived": {
-						GET: async () => await this.handleListArchivedMilestones(),
+						GET: async (req: Request) => await this.routeApi(req, (target) => target.handleListArchivedMilestones()),
 					},
 					"/api/milestones/:id": {
-						GET: async (req: Request & { params: { id: string } }) => await this.handleGetMilestone(req.params.id),
+						GET: async (req: Request & { params: { id: string } }) =>
+							await this.routeApi(req, (target, routed) => target.handleGetMilestone((routed as typeof req).params.id)),
 						PUT: async (req: Request & { params: { id: string } }) =>
-							await this.handleUpdateMilestone(req, req.params.id),
+							await this.routeApi(req, (target, routed) =>
+								target.handleUpdateMilestone(routed, (routed as typeof req).params.id),
+							),
 						DELETE: async (req: Request & { params: { id: string } }) =>
-							await this.handleRemoveMilestone(req, req.params.id),
+							await this.routeApi(req, (target, routed) =>
+								target.handleRemoveMilestone(routed, (routed as typeof req).params.id),
+							),
 					},
 					"/api/milestones/:id/archive": {
-						POST: async (req: Request & { params: { id: string } }) => await this.handleArchiveMilestone(req.params.id),
+						POST: async (req: Request & { params: { id: string } }) =>
+							await this.routeApi(req, (target, routed) =>
+								target.handleArchiveMilestone((routed as typeof req).params.id),
+							),
 					},
 					"/api/tasks/reorder": {
-						POST: async (req: Request) => await this.handleReorderTask(req),
+						POST: async (req: Request) =>
+							await this.routeApi(req, (target, routed) => target.handleReorderTask(routed)),
 					},
 					"/api/tasks/move": {
-						POST: async (req: Request) => await this.handleMoveTasks(req),
+						POST: async (req: Request) => await this.routeApi(req, (target, routed) => target.handleMoveTasks(routed)),
 					},
 					"/api/tasks/cleanup": {
-						GET: async (req: Request) => await this.handleCleanupPreview(req),
+						GET: async (req: Request) =>
+							await this.routeApi(req, (target, routed) => target.handleCleanupPreview(routed)),
 					},
 					"/api/tasks/duplicates": {
-						GET: async () => await this.handleGetDuplicateTasks(),
-						POST: async (req: Request) => await this.handleRepairDuplicateTasks(req),
+						GET: async (req: Request) => await this.routeApi(req, (target) => target.handleGetDuplicateTasks()),
+						POST: async (req: Request) =>
+							await this.routeApi(req, (target, routed) => target.handleRepairDuplicateTasks(routed)),
 					},
 					"/api/tasks/cleanup/execute": {
-						POST: async (req: Request) => await this.handleCleanupExecute(req),
+						POST: async (req: Request) =>
+							await this.routeApi(req, (target, routed) => target.handleCleanupExecute(routed)),
 					},
 					"/api/version": {
-						GET: async () => await this.handleGetVersion(),
+						GET: async (req: Request) => await this.routeApi(req, (target) => target.handleGetVersion()),
 					},
 					"/api/statistics": {
-						GET: async () => await this.handleGetStatistics(),
+						GET: async (req: Request) => await this.routeApi(req, (target) => target.handleGetStatistics()),
 					},
 					"/api/status": {
-						GET: async () => await this.handleGetStatus(),
+						GET: async (req: Request) => await this.routeApi(req, (target) => target.handleGetStatus()),
 					},
 					"/api/init": {
-						POST: async (req: Request) => await this.handleInit(req),
+						POST: async (req: Request) => await this.routeApi(req, (target, routed) => target.handleInit(routed)),
 					},
 					"/api/search": {
-						GET: async (req: Request) => await this.handleSearch(req),
+						GET: async (req: Request) => await this.routeApi(req, (target, routed) => target.handleSearch(routed)),
+					},
+					"/api/workflow": {
+						GET: async (req: Request) => await this.routeApi(req, (target, routed) => target.handleWorkflow(routed)),
+					},
+					"/api/workflow/respond": {
+						POST: async (req: Request) =>
+							await this.routeApi(req, (target, routed) => target.handleWorkflowMutation(routed, "respond")),
+					},
+					"/api/workflow/cancel": {
+						POST: async (req: Request) =>
+							await this.routeApi(req, (target, routed) => target.handleWorkflowMutation(routed, "cancel")),
+					},
+					"/api/workflow/resume": {
+						POST: async (req: Request) =>
+							await this.routeApi(req, (target, routed) => target.handleWorkflowMutation(routed, "resume")),
+					},
+					"/api/workflow/material": {
+						GET: async (req: Request) =>
+							await this.routeApi(req, (target, routed) => target.handleWorkflowMaterial(routed)),
 					},
 					// Serve files placed under backlog/assets at /assets/<relative-path>
 					"/assets/*": {
-						GET: async (req: Request) => await this.handleAssetRequest(req),
+						GET: async (req: Request) =>
+							await this.routeApi(req, (target, routed) => target.handleAssetRequest(routed)),
 					},
 				},
 				fetch: async (req: Request, server: Server<unknown>) => {
@@ -612,6 +807,8 @@ export class BacklogServer {
 
 	async stop(): Promise<void> {
 		if (this.taskBroadcastTimer) clearTimeout(this.taskBroadcastTimer);
+		this.pendingDataBroadcastWorkspaceIds.clear();
+		this.pendingDataBroadcastAllWorkspaces = false;
 		if (this._stopping) return;
 		this._stopping = true;
 
@@ -623,6 +820,9 @@ export class BacklogServer {
 
 		this.core.disposeSearchService();
 		this.core.disposeContentStore();
+		for (const routed of this.workspaceServers.values()) await routed.stop();
+		this.workspaceServers.clear();
+		this.workflowSnapshotCache.clear();
 		this.restoreRuntimeWorkingDirectory();
 		this.searchService = null;
 		this.contentStore = null;
@@ -728,9 +928,38 @@ export class BacklogServer {
 
 	// Task handlers
 	private async handleListTasks(req: Request): Promise<Response> {
+		const requestUrl = new URL(req.url);
+		if (requestUrl.searchParams.get("allWorkspaces") === "true") {
+			const entries = await listWorkspaces();
+			const tasks: Array<Task & { workspaceId: string }> = [];
+			const errors: Array<{ workspaceId: string; error: string }> = [];
+			for (const entry of entries) {
+				if (entry.error) {
+					errors.push({ workspaceId: entry.id, error: entry.error });
+					continue;
+				}
+				const workspaceServer =
+					entry.rootPath === this.core.filesystem.rootDir
+						? this
+						: (this.workspaceServers.get(entry.id) ?? new BacklogServer(entry.rootPath));
+				if (workspaceServer !== this) {
+					workspaceServer.parentServer = this;
+					workspaceServer.parentWorkspaceId = entry.id;
+					this.workspaceServers.set(entry.id, workspaceServer);
+				}
+				try {
+					for (const task of await workspaceServer.core.queryTasks({ includeCrossBranch: false })) {
+						tasks.push({ ...task, workspaceId: entry.id });
+					}
+				} catch (error) {
+					errors.push({ workspaceId: entry.id, error: error instanceof Error ? error.message : String(error) });
+				}
+			}
+			return Response.json({ tasks, errors });
+		}
 		let refreshCrossBranch = this.servicesInitialized;
 		await this.ensureServicesReady();
-		const url = new URL(req.url);
+		const url = requestUrl;
 		const status = url.searchParams.get("status") || undefined;
 		const assignee = url.searchParams.get("assignee") || undefined;
 		const parent = url.searchParams.get("parent") || undefined;
@@ -815,7 +1044,18 @@ export class BacklogServer {
 			refreshCrossBranch,
 		});
 
-		return Response.json(tasks);
+		const workspaceId = (await listWorkspaces()).find(
+			(entry) => entry.rootPath === this.core.filesystem.rootDir && !entry.error,
+		)?.id;
+		return Response.json(workspaceId ? tasks.map((task) => ({ ...task, workspaceId })) : tasks);
+	}
+
+	private async handleListWorkspaces(): Promise<Response> {
+		return Response.json(await listWorkspaces());
+	}
+
+	private async handleListAllWorkspaceTasks(): Promise<Response> {
+		return await this.handleListTasks(new Request("http://localhost/api/tasks?allWorkspaces=true"));
 	}
 
 	private async handleSearch(req: Request): Promise<Response> {
@@ -980,6 +1220,8 @@ export class BacklogServer {
 
 	private async handleCreateTask(req: Request): Promise<Response> {
 		const payload = await req.json();
+		const workspaceError = await this.validateWorkspaceTarget(payload?.workspaceId);
+		if (workspaceError) return workspaceError;
 
 		if (!payload || typeof payload.title !== "string" || payload.title.trim().length === 0) {
 			return Response.json({ error: "Title is required" }, { status: 400 });
@@ -1073,15 +1315,22 @@ export class BacklogServer {
 	 * One task, as a detail read returns it: the record plus the relationships derived at read time,
 	 * so the browser gets the dependency graph in the same response that opens the task.
 	 */
-	private async handleGetTask(taskId: string): Promise<Response> {
+	private async handleGetTask(taskId: string, requestedWorkspaceId?: string): Promise<Response> {
 		const resolved = await this.resolveDetailTask(taskId);
 		if (resolved instanceof Response) return resolved;
 		await this.ensureServicesReady();
-		return Response.json(await loadTaskDetail(this.core, resolved, { includeCrossBranch: true }));
+		const detail = await loadTaskDetail(this.core, resolved, { includeCrossBranch: true });
+		const workspaceId =
+			requestedWorkspaceId ??
+			this.parentWorkspaceId ??
+			(await listWorkspaces()).find((entry) => entry.rootPath === this.core.filesystem.rootDir && !entry.error)?.id;
+		return Response.json(workspaceId ? { ...detail, workspaceId } : detail);
 	}
 
 	private async handleUpdateTask(req: Request, taskId: string): Promise<Response> {
 		const updates = await req.json();
+		const workspaceError = await this.validateWorkspaceTarget(updates?.workspaceId);
+		if (workspaceError) return workspaceError;
 		const dueDate = parseDueDatePayload(updates?.dueDate, true);
 		if (!dueDate.ok) return Response.json({ error: dueDate.error }, { status: 400 });
 
@@ -1530,6 +1779,296 @@ export class BacklogServer {
 		} catch (error) {
 			console.error("Error loading config:", error);
 			return Response.json({ error: "Failed to load configuration" }, { status: 500 });
+		}
+	}
+
+	private async workflowOptions(): Promise<WorkflowOptions> {
+		return await this.workflowOptionsForRoot(this.core.filesystem.rootDir);
+	}
+
+	private async workflowOptionsForRoot(root: string): Promise<WorkflowOptions> {
+		const core = new Core(root);
+		const config = await core.filesystem.loadConfig();
+		core.disposeContentStore();
+		core.disposeSearchService();
+		return {
+			root,
+			enabled: config?.workflow?.enabled ?? false,
+			rq: config?.workflow?.rqPath,
+			pythonPath: config?.workflow?.pythonPath,
+		};
+	}
+
+	private async workflowSnapshot(root: string): Promise<WorkflowCommandResult> {
+		const result = await this.workflowSnapshotCache.get(root, async () =>
+			runWorkflow(["board", "--plain"], await this.workflowOptionsForRoot(root)),
+		);
+		if (result.exitCode !== 0) this.workflowSnapshotCache.invalidate(root);
+		return result;
+	}
+
+	private workflowResult(
+		result: WorkflowCommandResult,
+		workspaceId?: string,
+		writable?: boolean,
+	): Record<string, unknown> {
+		let data: unknown = null;
+		try {
+			if (result.stdout.trim()) data = JSON.parse(result.stdout);
+		} catch {
+			data = result.stdout;
+		}
+		return {
+			ok: result.exitCode === 0,
+			exitCode: result.exitCode,
+			...(workspaceId ? { workspaceId } : {}),
+			...(writable !== undefined ? { writable } : {}),
+			data,
+			stdout: result.stdout,
+			stderr: result.stderr,
+		};
+	}
+
+	private decorateWorkflowData(data: unknown, workspaceId?: string, writable?: boolean, warning?: string): unknown {
+		if (!data || typeof data !== "object" || Array.isArray(data)) return data;
+		const output = { ...(data as Record<string, unknown>) };
+		for (const key of ["tasks", "requests", "review_items"] as const) {
+			if (Array.isArray(output[key])) {
+				output[key] = output[key].map((item) => ({
+					...(item as Record<string, unknown>),
+					...(workspaceId ? { workspaceId } : {}),
+					...(writable !== undefined ? { writable } : {}),
+				}));
+			}
+		}
+		if (output.agents && typeof output.agents === "object") {
+			const agents = output.agents as { items?: unknown[] };
+			output.agents = {
+				...agents,
+				items: Array.isArray(agents.items)
+					? agents.items.map((item) => ({
+							...(item as Record<string, unknown>),
+							...(workspaceId ? { workspaceId } : {}),
+							...(writable !== undefined ? { writable } : {}),
+						}))
+					: [],
+			};
+		}
+		if (warning) output.warnings = [{ ...(workspaceId ? { workspaceId } : {}), warning }];
+		return output;
+	}
+
+	private async handleWorkflow(req: Request): Promise<Response> {
+		const url = new URL(req.url);
+		const aggregate = url.searchParams.get("allWorkspaces") === "true";
+		const refresh = url.searchParams.get("refresh") === "true";
+		if (!aggregate) {
+			if (refresh) this.workflowSnapshotCache.refresh(this.core.filesystem.rootDir);
+			const result = await this.workflowSnapshot(this.core.filesystem.rootDir);
+			const entry = (await listWorkspaces()).find((candidate) => candidate.rootPath === this.core.filesystem.rootDir);
+			const response = this.workflowResult(result, entry?.id, entry?.writable);
+			response.data = this.decorateWorkflowData(
+				response.data,
+				entry?.id,
+				entry?.writable,
+				this.workflowSnapshotCache.warning(this.core.filesystem.rootDir),
+			);
+			return Response.json(response);
+		}
+		const output = { tasks: [], requests: [], review_items: [], agents: { items: [] }, errors: [], warnings: [] } as {
+			tasks: unknown[];
+			requests: unknown[];
+			review_items: unknown[];
+			agents: { items: unknown[] };
+			errors: unknown[];
+			warnings: unknown[];
+		};
+		const aggregateDeadline = performance.now() + 2_000;
+		const entries = await listWorkspaces();
+		if (refresh) {
+			for (const entry of entries) if (!entry.error) this.workflowSnapshotCache.refresh(entry.rootPath);
+		}
+		const results = await Promise.all(
+			entries.map(async (entry) => {
+				if (entry.error) return { entry, error: entry.error };
+				const remaining = aggregateDeadline - performance.now();
+				if (remaining <= 0) return { entry, error: "Workflow snapshot is still loading.", loading: true };
+				let timeout: ReturnType<typeof setTimeout> | undefined;
+				try {
+					const result = await Promise.race([
+						this.workflowSnapshot(entry.rootPath),
+						new Promise<undefined>((resolve) => {
+							timeout = setTimeout(() => resolve(undefined), remaining);
+						}),
+					]);
+					return result ? { entry, result } : { entry, error: "Workflow snapshot is still loading.", loading: true };
+				} catch (error) {
+					return { entry, error: error instanceof Error ? error.message : String(error) };
+				} finally {
+					if (timeout) clearTimeout(timeout);
+				}
+			}),
+		);
+		/* Keep response order stable while all roots share one deadline. */
+		for (const { entry, result, error, loading } of results) {
+			if (error) {
+				output.errors.push({ workspaceId: entry.id, error, ...(loading ? { loading: true } : {}) });
+				continue;
+			}
+			if (!result) continue;
+			const warning = this.workflowSnapshotCache.warning(entry.rootPath);
+			if (warning) output.warnings.push({ workspaceId: entry.id, warning });
+			if (result.exitCode !== 0) {
+				output.errors.push({
+					workspaceId: entry.id,
+					error: result.stderr || result.stdout || `rq exited with code ${result.exitCode}`,
+				});
+				continue;
+			}
+			try {
+				const data = JSON.parse(result.stdout) as Record<string, unknown>;
+				for (const key of ["tasks", "requests", "review_items"] as const) {
+					for (const item of Array.isArray(data[key]) ? data[key] : [])
+						output[key].push({ ...(item as Record<string, unknown>), workspaceId: entry.id, writable: entry.writable });
+				}
+				const agents =
+					data.agents && typeof data.agents === "object" ? (data.agents as { items?: unknown[] }).items : [];
+				for (const item of Array.isArray(agents) ? agents : [])
+					output.agents.items.push({
+						...(item as Record<string, unknown>),
+						workspaceId: entry.id,
+						writable: entry.writable,
+					});
+			} catch {
+				output.errors.push({ workspaceId: entry.id, error: "Workflow snapshot was not valid JSON." });
+			}
+		}
+		return Response.json(output);
+	}
+
+	private async handleWorkflowMutation(req: Request, action: "respond" | "cancel" | "resume"): Promise<Response> {
+		try {
+			const body = (await req.json()) as Record<string, unknown>;
+			const text = (key: string) => (typeof body[key] === "string" ? body[key].trim() : "");
+			const requestId = text("requestId");
+			if (!requestId) return Response.json({ error: "requestId is required" }, { status: 400 });
+			const args = [action, requestId];
+			if (action === "respond") {
+				const reply = text("reply");
+				const responseAction = text("action");
+				const expectedRevision = text("expectedRevision");
+				const idempotencyKey = text("idempotencyKey");
+				if (!reply || !responseAction || !idempotencyKey || (responseAction !== "answer" && !expectedRevision))
+					return Response.json(
+						{
+							error: "reply, action and idempotencyKey are required; expectedRevision is required for approval actions",
+						},
+						{ status: 400 },
+					);
+				args.push(reply, "--action", responseAction, "--idempotency-key", idempotencyKey);
+				if (expectedRevision) args.push("--expected-revision", expectedRevision);
+			} else if (action === "cancel") {
+				const reason = text("reason");
+				if (!reason) return Response.json({ error: "reason is required" }, { status: 400 });
+				args.push("--reason", reason);
+			}
+			const by = text("by");
+			if (by && action !== "resume") args.push("--by", by);
+			const result = await runWorkflow(args, await this.workflowOptions());
+			this.workflowSnapshotCache.invalidate(this.core.filesystem.rootDir);
+			const response = this.workflowResult(result);
+			try {
+				const snapshot = await runWorkflow(["board", "--plain"], await this.workflowOptions());
+				if (snapshot.exitCode === 0) {
+					const data = JSON.parse(snapshot.stdout) as { requests?: Array<Record<string, unknown>> };
+					const request = data.requests?.find((item) => item.request_id === requestId || item.id === requestId);
+					if (request) {
+						const matches =
+							action === "respond"
+								? request.status === "answered" &&
+									request.reply === text("reply") &&
+									request.action === text("action") &&
+									request.idempotency_key === text("idempotencyKey")
+								: action === "cancel"
+									? request.status === "cancelled"
+									: false;
+						if (matches) response.saved = true;
+					}
+				}
+			} catch {
+				// Preserve the command result while leaving saved unknown when projection cannot be checked.
+			}
+			if (result.stdout.includes("投影待修复") || result.stdout.toLowerCase().includes("projection pending")) {
+				response.projectionPending = true;
+			}
+			return Response.json(response);
+		} catch (error) {
+			return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 });
+		}
+	}
+
+	private async handleWorkflowMaterial(req: Request): Promise<Response> {
+		const path = new URL(req.url).searchParams.get("path")?.trim();
+		if (!path || isAbsolute(path) || path.split(/[\\/]/).includes(".."))
+			return Response.json({ error: "A registered-root relative path is required." }, { status: 400 });
+		const snapshot = await this.workflowSnapshot(this.core.filesystem.rootDir);
+		if (snapshot.exitCode !== 0) return Response.json(this.workflowResult(snapshot), { status: 409 });
+		let data: unknown;
+		try {
+			data = JSON.parse(snapshot.stdout);
+		} catch {
+			return Response.json({ error: "Workflow snapshot was not valid JSON." }, { status: 409 });
+		}
+		const allowed = new Set<string>();
+		const collect = (value: unknown): void => {
+			if (Array.isArray(value)) {
+				value.forEach(collect);
+				return;
+			}
+			if (!value || typeof value !== "object") return;
+			for (const [key, child] of Object.entries(value)) {
+				if (key === "preview") {
+					for (const item of Array.isArray(child) ? child : [])
+						if (typeof item === "string") allowed.add(item.replaceAll("\\", "/"));
+				} else collect(child);
+			}
+		};
+		collect(data);
+		if (!allowed.has(path.replaceAll("\\", "/")))
+			return Response.json({ error: "Material is not approved by the current workflow snapshot." }, { status: 403 });
+		const root = resolve(await realpath(this.core.filesystem.rootDir));
+		const candidate = resolve(root, path);
+		const candidateRelative = relative(root, candidate);
+		if (isAbsolute(candidateRelative) || candidateRelative.startsWith(`..${sep}`) || candidateRelative === "..")
+			return Response.json({ error: "Material path escapes workspace root." }, { status: 403 });
+		try {
+			if ((await lstat(candidate)).isSymbolicLink())
+				return Response.json({ error: "Symlink materials are not allowed." }, { status: 403 });
+			const target = resolve(await realpath(candidate));
+			const targetRelative = relative(root, target);
+			if (isAbsolute(targetRelative) || targetRelative.startsWith(`..${sep}`) || targetRelative === "..")
+				return Response.json({ error: "Material path escapes workspace root." }, { status: 403 });
+			const handle = await open(target, "r");
+			try {
+				if (!(await handle.stat()).isFile())
+					return Response.json({ error: "Material must be a text file no larger than 64KiB." }, { status: 403 });
+				const bytes = Buffer.alloc(64 * 1024 + 1);
+				const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
+				if (bytesRead > 64 * 1024)
+					return Response.json({ error: "Material must be a text file no larger than 64KiB." }, { status: 403 });
+				let content: string;
+				try {
+					content = new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, bytesRead));
+				} catch {
+					return Response.json({ error: "Material must be a UTF-8 text file." }, { status: 403 });
+				}
+				if (content.includes("\0")) return Response.json({ error: "Material must be a text file." }, { status: 403 });
+				return Response.json({ ok: true, path, content });
+			} finally {
+				await handle.close();
+			}
+		} catch {
+			return Response.json({ error: "Material is unavailable." }, { status: 404 });
 		}
 	}
 

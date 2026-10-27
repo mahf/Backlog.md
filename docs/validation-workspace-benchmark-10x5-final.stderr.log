@@ -1,0 +1,27 @@
+[benchmark] fixture 0
+[benchmark] fixture 5
+[benchmark] registered 10 workspaces; starting HTTP server
+[benchmark] HTTP server ready on http://127.0.0.1:53277
+[benchmark] roots=10 repeat=1/5 starting
+[benchmark] warm-up: 400/1000 tasks, 6 errors
+[benchmark] warm-up: 0/1000 tasks, 10 errors
+[benchmark] warm-up: 600/1000 tasks, 4 errors
+[benchmark] roots=10 repeat=1/5 natural=1117.1ms
+[benchmark] roots=10 repeat=1/5 complete
+[benchmark] roots=10 repeat=2/5 starting
+[benchmark] warm-up: 400/1000 tasks, 6 errors
+[benchmark] roots=10 repeat=2/5 natural=1091.9ms
+[benchmark] roots=10 repeat=2/5 complete
+[benchmark] roots=10 repeat=3/5 starting
+[benchmark] warm-up: 400/1000 tasks, 6 errors
+[benchmark] roots=10 repeat=3/5 natural=1187.7ms
+[benchmark] roots=10 repeat=3/5 complete
+[benchmark] roots=10 repeat=4/5 starting
+[benchmark] warm-up: 400/1000 tasks, 6 errors
+[benchmark] roots=10 repeat=4/5 natural=1071.2ms
+[benchmark] roots=10 repeat=4/5 complete
+[benchmark] roots=10 repeat=5/5 starting
+[benchmark] warm-up: 0/1000 tasks, 10 errors
+[benchmark] warm-up: 800/1000 tasks, 2 errors
+[benchmark] roots=10 repeat=5/5 natural=1473.8ms
+[benchmark] roots=10 repeat=5/5 complete

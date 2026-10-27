@@ -13,6 +13,14 @@ explicit product decision.
 
 When you're working on a task, you should assign it yourself: -a @{your-name}
 
+## Requirement intake
+
+For new requirements analyzed with Superpowers, OpenSpec, grill-me, or to-spec,
+follow [the unified intake flow](docs/requirements-to-delivery.zh-CN.md).
+Use Backlog CLI parent tasks and subtasks as the only formal task structure;
+keep source specifications linked and let Workflow manage evidence and approvals.
+Do not create new legacy tickets or migrate existing work as part of intake.
+
 In addition to the rules above, please consider the following:
 At the end of every task implementation, try to take a moment to see if you can simplify it. 
 When you are done implementing, you know much more about a task than when you started.

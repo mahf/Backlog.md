@@ -152,7 +152,21 @@ export function createSimpleValidatedTool<T extends Record<string, unknown>>(
 	schema: JsonSchema,
 	handler: ValidatedToolHandler<T>,
 ): McpToolHandler {
-	return createValidatedTool(toolDefinition, createSchemaValidator(schema), handler);
+	if (toolDefinition.name === "get_backlog_instructions")
+		return createValidatedTool(toolDefinition, createSchemaValidator(schema), handler);
+	const workspaceSchema: JsonSchema = {
+		...schema,
+		properties: {
+			...schema.properties,
+			workspaceId: { type: "string", description: "Registered directory workspace identity." },
+			allWorkspaces: { type: "boolean", description: "Read across all registered workspaces." },
+		},
+	};
+	return createValidatedTool(
+		{ ...toolDefinition, inputSchema: workspaceSchema },
+		createSchemaValidator(workspaceSchema),
+		handler,
+	);
 }
 
 /**
@@ -164,5 +178,19 @@ export function createAsyncValidatedTool<T extends Record<string, unknown>>(
 	customValidator: (input: Record<string, unknown>, context?: ValidationContext) => Promise<string[]>,
 	handler: ValidatedToolHandler<T>,
 ): McpToolHandler {
-	return createValidatedTool(toolDefinition, createAsyncValidator(schema, customValidator), handler);
+	if (toolDefinition.name === "get_backlog_instructions")
+		return createValidatedTool(toolDefinition, createAsyncValidator(schema, customValidator), handler);
+	const workspaceSchema: JsonSchema = {
+		...schema,
+		properties: {
+			...schema.properties,
+			workspaceId: { type: "string", description: "Registered directory workspace identity." },
+			allWorkspaces: { type: "boolean", description: "Read across all registered workspaces." },
+		},
+	};
+	return createValidatedTool(
+		{ ...toolDefinition, inputSchema: workspaceSchema },
+		createAsyncValidator(workspaceSchema, customValidator),
+		handler,
+	);
 }

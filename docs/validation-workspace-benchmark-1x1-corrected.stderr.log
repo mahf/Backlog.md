@@ -1,0 +1,3 @@
+[benchmark] roots=1 repeat=1/1 starting
+[benchmark] roots=1 repeat=1/1 natural=766.3ms
+[benchmark] roots=1 repeat=1/1 complete

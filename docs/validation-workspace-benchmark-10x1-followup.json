@@ -1,0 +1,60 @@
+{
+	"environment": {
+		"platform": "win32",
+		"runtime": "v24.3.0",
+		"repeats": 1,
+		"rq": "C:/Users/haifeng.ma/OneDrive/AI工具配置/workflow/tools/rq.py"
+	},
+	"results": {
+		"10": {
+			"roots": 10,
+			"tasksPerRoot": 100,
+			"status": "measured",
+			"sampleCount": 1,
+			"rqCalls": 11,
+			"coldRqCalls": [10],
+			"warmRqCalls": [0],
+			"changedRqCalls": [1],
+			"cacheHit": true,
+			"changedOnlyOneRoot": true,
+			"coldAggregate": {
+				"medianMs": 4080.2834999999995,
+				"p95Ms": 4080.2834999999995
+			},
+			"warmAggregate": {
+				"medianMs": 6.330299999999625,
+				"p95Ms": 6.330299999999625
+			},
+			"changedToVisibleAggregate": {
+				"medianMs": 1099.4807,
+				"p95Ms": 1099.4807
+			},
+			"material": {
+				"medianMs": 1346.0917000000009,
+				"p95Ms": 1346.0917000000009
+			},
+			"respond": {
+				"medianMs": 1602.0083000000013,
+				"p95Ms": 1602.0083000000013
+			},
+			"materialSamples": [1346.0917000000009],
+			"respondSamples": [1602.0083000000013],
+			"httpSampleCount": {
+				"material": 1,
+				"respond": 1
+			},
+			"productionAggregateWarm": {
+				"medianMs": 29.6195000000007,
+				"p95Ms": 29.6195000000007
+			},
+			"productionNaturalVisible": {
+				"medianMs": 1001.5631999999996,
+				"p95Ms": 1001.5631999999996
+			},
+			"productionSamples": {
+				"aggregateWarm": [29.6195000000007],
+				"naturalVisible": [1001.5631999999996]
+			}
+		}
+	}
+}

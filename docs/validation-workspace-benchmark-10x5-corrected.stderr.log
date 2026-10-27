@@ -1,0 +1,19 @@
+[benchmark] roots=10 repeat=1/5 starting
+[benchmark] warm-up: 0/1000 tasks, 10 errors
+[benchmark] warm-up: 0/1000 tasks, 10 errors
+[benchmark] roots=10 repeat=1/5 natural=1054.9ms
+[benchmark] roots=10 repeat=1/5 complete
+[benchmark] roots=10 repeat=2/5 starting
+[benchmark] roots=10 repeat=2/5 natural=943.8ms
+[benchmark] roots=10 repeat=2/5 complete
+[benchmark] roots=10 repeat=3/5 starting
+[benchmark] warm-up: 400/1000 tasks, 6 errors
+[benchmark] roots=10 repeat=3/5 natural=1128.4ms
+[benchmark] roots=10 repeat=3/5 complete
+[benchmark] roots=10 repeat=4/5 starting
+[benchmark] roots=10 repeat=4/5 natural=960.3ms
+[benchmark] roots=10 repeat=4/5 complete
+[benchmark] roots=10 repeat=5/5 starting
+[benchmark] warm-up: 300/1000 tasks, 7 errors
+[benchmark] roots=10 repeat=5/5 natural=1193.2ms
+[benchmark] roots=10 repeat=5/5 complete

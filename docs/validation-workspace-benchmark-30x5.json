@@ -1,0 +1,25 @@
+{
+	"environment": {
+		"platform": "win32",
+		"runtime": "v24.3.0",
+		"repeats": 5,
+		"rq": "C:/Users/haifeng.ma/OneDrive/AI工具配置/workflow/tools/rq.py"
+	},
+	"results": {
+		"30": {
+			"roots": 30,
+			"tasksPerRoot": 100,
+			"status": "incomplete",
+			"sampleCount": 0,
+			"requestedSampleCount": 5,
+			"failure": "The 30-root production benchmark did not emit a result before its Bun process became detached and was terminated. No latency or rq-call metrics are claimed.",
+			"completedSamples": 0,
+			"rqCalls": null,
+			"coldRqCalls": [],
+			"warmRqCalls": [],
+			"changedRqCalls": [],
+			"cacheHit": null,
+			"changedOnlyOneRoot": null
+		}
+	}
+}

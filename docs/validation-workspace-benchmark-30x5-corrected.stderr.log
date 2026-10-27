@@ -1,0 +1,103 @@
+[benchmark] fixture 0
+[benchmark] fixture 5
+[benchmark] fixture 10
+[benchmark] fixture 15
+[benchmark] fixture 20
+[benchmark] fixture 25
+[benchmark] registered 30 workspaces; starting HTTP server
+[benchmark] HTTP server ready on http://127.0.0.1:51389
+[benchmark] roots=30 repeat=1/5 starting
+[benchmark] warm-up: 0/3000 tasks, 30 errors
+[benchmark] warm-up: 0/3000 tasks, 30 errors
+[benchmark] warm-up: 2100/3000 tasks, 9 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+[benchmark] warm-up: 2800/3000 tasks, 2 errors
+Fixture cleanup deferred: EBUSY: resource busy or locked, rm 'C:\Users\haifeng.ma\AppData\Local\Temp\backlog-workspace-benchmark-NDiQep'
+56 | 		);
+57 | 		await new Promise((resolve) => setTimeout(resolve, 100));
+58 | 		snapshot = await aggregate(base);
+59 | 	}
+60 | 	if (!complete(snapshot, expectedTasks))
+61 | 		throw new Error(
+                 ^
+error: warm-up did not become complete before deadline (2800/3000 tasks; errors=[{"workspaceId":"benchmark-22","error":"Workflow snapshot is still loading.","loading":true},{"workspaceId":"benchmark-6","error":"Workflow snapshot is still loading.","loading":true}]).
+      at waitForComplete (D:\TMP\backlog.md\Backlog.md\scripts\workspace-benchmark.ts:61:13)
+      at measure (unknown:1:1)
+      at unknown:1:1
+      at processTicksAndRejections (unknown:7:39)
+
+Bun v1.3.10 (Windows x64)

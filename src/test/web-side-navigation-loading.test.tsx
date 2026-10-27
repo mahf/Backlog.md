@@ -16,9 +16,9 @@ globalThis.localStorage = {
 	},
 } as Storage;
 
-const renderNavigation = (isLoading: boolean, taskCount: number, error?: Error): string =>
+const renderNavigation = (isLoading: boolean, taskCount: number, error?: Error, url = "http://localhost/"): string =>
 	renderToString(
-		<MemoryRouter>
+		<MemoryRouter initialEntries={[new URL(url).pathname + new URL(url).search]}>
 			<SideNavigation
 				taskCount={taskCount}
 				docs={[]}
@@ -71,6 +71,13 @@ describe("SideNavigation task loading", () => {
 		expect(loaded).toContain("No documents");
 		expect(loaded).toContain("No decisions");
 		expect(loaded).not.toContain('aria-label="Loading task count"');
+	});
+
+	it("keeps the selected directory workspace on every primary navigation link", () => {
+		const rendered = renderNavigation(false, 1, undefined, "http://localhost/tasks?workspace=alpha");
+		for (const path of ["/board", "/tasks", "/milestones", "/drafts", "/statistics", "/workflow", "/settings"]) {
+			expect(rendered).toContain(`href="${path}?workspace=alpha"`);
+		}
 	});
 
 	it("shows a distinct unavailable presentation and exposes retry after a corpus failure", () => {

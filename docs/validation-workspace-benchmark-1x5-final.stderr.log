@@ -1,0 +1,18 @@
+[benchmark] fixture 0
+[benchmark] registered 1 workspaces; starting HTTP server
+[benchmark] HTTP server ready on http://127.0.0.1:53158
+[benchmark] roots=1 repeat=1/5 starting
+[benchmark] roots=1 repeat=1/5 natural=802.9ms
+[benchmark] roots=1 repeat=1/5 complete
+[benchmark] roots=1 repeat=2/5 starting
+[benchmark] roots=1 repeat=2/5 natural=1053.3ms
+[benchmark] roots=1 repeat=2/5 complete
+[benchmark] roots=1 repeat=3/5 starting
+[benchmark] roots=1 repeat=3/5 natural=975.2ms
+[benchmark] roots=1 repeat=3/5 complete
+[benchmark] roots=1 repeat=4/5 starting
+[benchmark] roots=1 repeat=4/5 natural=1058.6ms
+[benchmark] roots=1 repeat=4/5 complete
+[benchmark] roots=1 repeat=5/5 starting
+[benchmark] roots=1 repeat=5/5 natural=1389.6ms
+[benchmark] roots=1 repeat=5/5 complete

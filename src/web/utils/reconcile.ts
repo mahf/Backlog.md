@@ -26,10 +26,14 @@ export function deepEqual(a: unknown, b: unknown): boolean {
  * views subscribed to the store then re-render only for real changes, and a
  * refresh that echoes an already-applied update is a state no-op.
  */
-export function reconcileById<T extends { id: string }>(current: readonly T[], next: readonly T[]): T[] {
-	const currentById = new Map(current.map((item) => [item.id, item]));
+export function reconcileById<T extends { id: string }>(
+	current: readonly T[],
+	next: readonly T[],
+	key: (item: T) => string = (item) => item.id,
+): T[] {
+	const currentById = new Map(current.map((item) => [key(item), item]));
 	const merged = next.map((item) => {
-		const existing = currentById.get(item.id);
+		const existing = currentById.get(key(item));
 		return existing && deepEqual(existing, item) ? existing : item;
 	});
 	if (merged.length === current.length && merged.every((item, index) => item === current[index])) {

@@ -240,6 +240,9 @@ export async function viewTaskEnhanced(
 	options: {
 		tasks?: Task[];
 		core?: Core;
+		resolveTaskCore?: (task: Task) => Core | undefined;
+		/** Aggregate task lists do not have a target-aware Core; keep writes fail-closed. */
+		readOnly?: boolean;
 		/** Screen to draw on. Tests pass their own; by default the viewer creates one. */
 		screen?: ScreenInterface;
 		title?: string;
@@ -290,6 +293,9 @@ export async function viewTaskEnhanced(
 
 	// Reuse the caller's Core so every surface reads the same project root.
 	const core = options.core || (await createRuntimeCore({ enableWatchers: true }));
+	const taskWorkspaceId = (value: Task): string | undefined => (value as Task & { workspaceId?: string }).workspaceId;
+	const sameTask = (left: Task, right: Task): boolean =>
+		left.id === right.id && taskWorkspaceId(left) === taskWorkspaceId(right);
 
 	// Show loading screen while loading tasks (can be slow with cross-branch loading)
 	let allTasks: Task[];
@@ -892,12 +898,12 @@ export async function viewTaskEnhanced(
 		const listController = replaceTaskList();
 		if (listController) {
 			const forceFirst = startOnFirstRow;
-			let desiredIndex = filteredTasks.findIndex((t) => t.id === currentSelectedTask.id);
+			let desiredIndex = filteredTasks.findIndex((t) => sameTask(t, currentSelectedTask));
 			if (forceFirst || desiredIndex < 0) {
 				desiredIndex = 0;
 			}
 			const desiredTask = filteredTasks[desiredIndex];
-			if (desiredTask && desiredTask.id !== currentSelectedTask.id) {
+			if (desiredTask && !sameTask(desiredTask, currentSelectedTask)) {
 				currentSelectedTask = enrichTask(desiredTask) ?? desiredTask;
 				options.onTaskChange?.(currentSelectedTask);
 			}
@@ -943,7 +949,7 @@ export async function viewTaskEnhanced(
 
 	async function applySelection(selectedTask: Task | null) {
 		if (!selectedTask) return;
-		if (currentSelectedTask && selectedTask.id === currentSelectedTask.id) {
+		if (currentSelectedTask && sameTask(selectedTask, currentSelectedTask)) {
 			return;
 		}
 		const enriched = enrichTask(selectedTask);
@@ -952,7 +958,10 @@ export async function viewTaskEnhanced(
 		const requestId = ++selectionRequestId;
 		refreshDetailPane();
 		screen.render();
-		const refreshed = await core.getTaskWithSubtasks(selectedTask.id, allTasks);
+		const refreshed = await (options.resolveTaskCore?.(selectedTask) ?? core).getTaskWithSubtasks(
+			selectedTask.id,
+			allTasks,
+		);
 		if (requestId !== selectionRequestId) {
 			return;
 		}
@@ -968,7 +977,7 @@ export async function viewTaskEnhanced(
 	function createTaskList(): GenericList<Task> {
 		const initialIndex = Math.max(
 			0,
-			filteredTasks.findIndex((t) => t.id === currentSelectedTask.id),
+			filteredTasks.findIndex((t) => sameTask(t, currentSelectedTask)),
 		);
 
 		const list = createGenericList<Task>({
@@ -1280,9 +1289,19 @@ export async function viewTaskEnhanced(
 			return;
 		}
 		const selectedTask = currentSelectedTask;
+		if (options.readOnly) {
+			showTransientHelp(
+				" {yellow-fg}Task list is read-only across workspaces; switch to one workspace in the board.{/}",
+			);
+			return;
+		}
 
 		try {
-			const result = await core.editTaskInTui(selectedTask.id, screen, selectedTask);
+			const result = await (options.resolveTaskCore?.(selectedTask) ?? core).editTaskInTui(
+				selectedTask.id,
+				screen,
+				selectedTask,
+			);
 			if (result.reason === "read_only") {
 				showTransientHelp(formatReadOnlyNotice(result.task ?? selectedTask));
 				return;
@@ -1313,19 +1332,26 @@ export async function viewTaskEnhanced(
 			}
 
 			if (result.task) {
+				const updatedTask = result.task;
 				// Reconcile by file identity first: with task_prefix="draft" a task and a draft can
 				// share one id, so an id match alone may target the wrong record.
 				const index = allTasks.findIndex(
 					(taskItem) =>
-						(result.task?.filePath !== undefined &&
+						(updatedTask.filePath !== undefined &&
 							taskItem.filePath !== undefined &&
-							taskItem.filePath === result.task.filePath) ||
-						taskItem.id === result.task?.id,
+							taskItem.filePath === updatedTask.filePath) ||
+						sameTask(taskItem, {
+							...updatedTask,
+							...(taskWorkspaceId(selectedTask) ? { workspaceId: taskWorkspaceId(selectedTask) } : {}),
+						}),
 				);
 				if (index >= 0) {
-					allTasks[index] = result.task;
+					allTasks[index] = {
+						...updatedTask,
+						...(taskWorkspaceId(selectedTask) ? { workspaceId: taskWorkspaceId(selectedTask) } : {}),
+					};
 				}
-				const enhancedTask = enrichTask(result.task) ?? result.task;
+				const enhancedTask = enrichTask(allTasks[index] ?? updatedTask) ?? allTasks[index] ?? updatedTask;
 				currentSelectedTask = enhancedTask;
 				options.onTaskChange?.(enhancedTask);
 				taskSearchIndex = createTaskSearchIndex(allTasks);
@@ -1350,12 +1376,16 @@ export async function viewTaskEnhanced(
 	};
 
 	const removeTaskFromCurrentView = (taskId: string) => {
-		const currentIndex = filteredTasks.findIndex((taskItem) => taskItem.id === taskId);
-		const remainingFilteredTasks = filteredTasks.filter((taskItem) => taskItem.id !== taskId);
+		const currentIndex = filteredTasks.findIndex(
+			(taskItem) => taskItem.id === taskId && sameTask(taskItem, currentSelectedTask),
+		);
+		const remainingFilteredTasks = filteredTasks.filter(
+			(taskItem) => !(taskItem.id === taskId && sameTask(taskItem, currentSelectedTask)),
+		);
 		const nextIndex = Math.min(Math.max(currentIndex, 0), remainingFilteredTasks.length - 1);
 		const nextTask = remainingFilteredTasks[nextIndex] ?? null;
 
-		allTasks = allTasks.filter((taskItem) => taskItem.id !== taskId);
+		allTasks = allTasks.filter((taskItem) => !(taskItem.id === taskId && sameTask(taskItem, currentSelectedTask)));
 		taskSearchIndex = createTaskSearchIndex(allTasks);
 		if (nextTask) {
 			currentSelectedTask = enrichTask(nextTask) ?? nextTask;
@@ -1374,7 +1404,13 @@ export async function viewTaskEnhanced(
 	};
 
 	const archiveCurrentTask = async (task: Task) => {
-		const result = await archiveTaskFromTui(core, task, (popup) =>
+		if (options.readOnly) {
+			showTransientHelp(
+				" {yellow-fg}Task list is read-only across workspaces; switch to one workspace in the board.{/}",
+			);
+			return;
+		}
+		const result = await archiveTaskFromTui(options.resolveTaskCore?.(task) ?? core, task, (popup) =>
 			runWithModalGuard(() => openConfirmPopup({ screen, ...popup })),
 		);
 		if (result.archived) {
@@ -1546,14 +1582,12 @@ export async function viewTaskEnhanced(
 		availableLabels = collectAvailableLabels(allTasks, labels);
 		taskSearchIndex = createTaskSearchIndex(allTasks);
 
-		const previousTaskId = currentSelectedTask.id;
-		const currentTask =
-			allTasks.find((candidate) => candidate.id === nextSelectedTask?.id) ??
-			allTasks.find((candidate) => candidate.id === currentSelectedTask.id) ??
-			allTasks[0];
+		const previousTask = currentSelectedTask;
+		const selectedReference = nextSelectedTask ?? currentSelectedTask;
+		const currentTask = allTasks.find((candidate) => sameTask(candidate, selectedReference)) ?? allTasks[0];
 		if (currentTask) {
 			currentSelectedTask = enrichTask(currentTask) ?? currentTask;
-			if (currentSelectedTask.id !== previousTaskId) options.onTaskChange?.(currentSelectedTask);
+			if (!sameTask(currentSelectedTask, previousTask)) options.onTaskChange?.(currentSelectedTask);
 		}
 		applyFilters();
 	});
@@ -1601,7 +1635,7 @@ export function generateDetailContent(
 ): { headerContent: string[]; bodyContent: string[] } {
 	const { resolveMilestoneLabel, dateFormat, configuredProjects, configuredPriorities } = options;
 	const headerContent = [
-		` ${wrapStatusColor(formatStatusWithIcon(task.status), getStatusColor(task.status))} {bold}{blue-fg}${task.id}{/blue-fg}{/bold} - ${task.title}`,
+		` ${wrapStatusColor(formatStatusWithIcon(task.status), getStatusColor(task.status))} {bold}{blue-fg}${task.id}{/blue-fg}{/bold}${typeof (task as Task & { workspaceId?: unknown }).workspaceId === "string" ? ` [${(task as Task & { workspaceId: string }).workspaceId}]` : ""} - ${task.title}`,
 	];
 
 	// Add cross-branch indicator if task is from another branch

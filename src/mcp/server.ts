@@ -20,6 +20,7 @@ import {
 	type ServerRequest,
 } from "@modelcontextprotocol/sdk/types.js";
 import { Core } from "../core/backlog.ts";
+import { listWorkspaces } from "../core/workspace-registry.ts";
 import type { BacklogConfig } from "../types/index.ts";
 import { getPackageName } from "../utils/app-info.ts";
 import { resolveBacklogDirectory } from "../utils/backlog-directory.ts";
@@ -53,7 +54,7 @@ import type {
  */
 const APP_NAME = getPackageName();
 const INSTRUCTIONS =
-	"At the beginning of each session, list the available resources and read the first one to understand how to use Backlog.md for task management. Additional detailed guides are available as resources when needed.";
+	"At the beginning of each session, list the available resources and read the first one to understand how to use Backlog.md for task management. Additional detailed guides are available as resources when needed. For registered multi-root workspaces, pass workspaceId as the directory identity; task IDs are local to that workspace, and allWorkspaces is read-only aggregation only.";
 
 type ServerInitOptions = {
 	debug?: boolean;
@@ -89,6 +90,7 @@ export class McpServer extends Core {
 	private readonly tools = new Map<string, McpToolHandler>();
 	private readonly resources = new Map<string, McpResourceHandler>();
 	private readonly prompts = new Map<string, McpPromptHandler>();
+	private readonly workspaceServers = new Map<string, McpServer>();
 
 	constructor(projectRoot: string, instructions: string, version = "0.0.0") {
 		super(projectRoot, { enableWatchers: true });
@@ -343,6 +345,35 @@ export class McpServer extends Core {
 		this.prompts.set(prompt.name, prompt);
 	}
 
+	private async workspaceServer(entry: { id: string; rootPath: string; error?: string }): Promise<McpServer> {
+		const cached = this.workspaceServers.get(entry.id);
+		if (cached && cached.filesystem.rootDir === entry.rootPath) return cached;
+		if (cached) await cached.stop();
+		const child = new McpServer(entry.rootPath, INSTRUCTIONS);
+		const config = await child.filesystem.loadConfig();
+		if (!config) {
+			await child.stop();
+			throw new McpError(ErrorCode.InvalidParams, `Workspace unavailable: ${entry.id}`);
+		}
+		registerWorkflowResources(child);
+		registerWorkflowTools(child);
+		registerTaskTools(child, config);
+		registerMilestoneTools(child);
+		registerDefinitionOfDoneTools(child);
+		registerDocumentTools(child, config);
+		this.workspaceServers.set(entry.id, child);
+		return child;
+	}
+
+	private tagWorkspaceResult(result: CallToolResult, workspaceId: string): CallToolResult {
+		return {
+			...result,
+			content: result.content.map((item) =>
+				item.type === "text" ? { ...item, text: `[workspaceId=${workspaceId}]\n${item.text}` } : item,
+			),
+		};
+	}
+
 	/**
 	 * Connect the server to the stdio transport.
 	 */
@@ -380,6 +411,8 @@ export class McpServer extends Core {
 			this.transport = undefined;
 			this.disposeSearchService();
 			this.disposeContentStore();
+			for (const child of this.workspaceServers.values()) await child.stop();
+			this.workspaceServers.clear();
 		}
 	}
 
@@ -417,8 +450,66 @@ export class McpServer extends Core {
 		if (!tool) {
 			throw new McpError(ErrorCode.InvalidParams, `Tool not found: ${name}`);
 		}
-
-		return await tool.handler(args);
+		const workspaceId = args.workspaceId;
+		if (args.allWorkspaces !== undefined && typeof args.allWorkspaces !== "boolean")
+			throw new McpError(ErrorCode.InvalidParams, "allWorkspaces must be a boolean.");
+		const entries = await listWorkspaces();
+		for (const [id, child] of this.workspaceServers) {
+			const entry = entries.find((candidate) => candidate.id === id);
+			if (!entry || entry.error || entry.rootPath !== child.filesystem.rootDir) {
+				await child.stop();
+				this.workspaceServers.delete(id);
+			}
+		}
+		const aggregateRequested = args.allWorkspaces === true;
+		if (aggregateRequested || workspaceId !== undefined) {
+			if (aggregateRequested && workspaceId !== undefined)
+				throw new McpError(ErrorCode.InvalidParams, "allWorkspaces cannot be combined with workspaceId.");
+			if (aggregateRequested && (!tool.annotations?.readOnlyHint || !["task_list", "task_search"].includes(tool.name)))
+				throw new McpError(ErrorCode.InvalidRequest, "Aggregate MCP operations are limited to task list/search.");
+			if (aggregateRequested) {
+				const aggregate = { content: [] as CallToolResult["content"] };
+				for (const candidate of entries) {
+					if (candidate.error) {
+						aggregate.content.push({ type: "text", text: `[workspaceId=${candidate.id}] error: ${candidate.error}` });
+						continue;
+					}
+					try {
+						const child = candidate.rootPath === this.filesystem.rootDir ? this : await this.workspaceServer(candidate);
+						const childTool = child.tools.get(name);
+						if (!childTool) throw new Error(`Tool not found: ${name}`);
+						const result = await childTool.handler({ ...args, workspaceId: undefined, allWorkspaces: undefined });
+						aggregate.content.push(...this.tagWorkspaceResult(result, candidate.id).content);
+					} catch (error) {
+						aggregate.content.push({
+							type: "text",
+							text: `[workspaceId=${candidate.id}] error: ${error instanceof Error ? error.message : String(error)}`,
+						});
+					}
+				}
+				return aggregate;
+			}
+			if (typeof workspaceId !== "string" || workspaceId.trim() === "") {
+				throw new McpError(ErrorCode.InvalidParams, "workspaceId must be a nonblank registered workspace id.");
+			}
+			const entry = entries.find((candidate) => candidate.id === workspaceId);
+			if (!entry) throw new McpError(ErrorCode.InvalidParams, `Workspace not found: ${workspaceId}`);
+			if (entry.error) throw new McpError(ErrorCode.InvalidParams, `Workspace unavailable: ${entry.error}`);
+			if (!tool.annotations?.readOnlyHint && !entry.writable)
+				throw new McpError(ErrorCode.InvalidRequest, `Workspace ${entry.id} is read-only.`);
+			if (entry.rootPath !== this.filesystem.rootDir) {
+				const child = await this.workspaceServer(entry);
+				const childTool = child.tools.get(name);
+				if (!childTool) throw new McpError(ErrorCode.InvalidParams, `Tool not found: ${name}`);
+				return this.tagWorkspaceResult(await childTool.handler({ ...args, workspaceId: undefined }), entry.id);
+			}
+			return this.tagWorkspaceResult(await tool.handler({ ...args, workspaceId: undefined }), entry.id);
+		}
+		const currentEntry = entries.find((candidate) => candidate.rootPath === this.filesystem.rootDir);
+		if (!tool.annotations?.readOnlyHint && currentEntry && !currentEntry.writable)
+			throw new McpError(ErrorCode.InvalidRequest, `Workspace ${currentEntry.id} is read-only.`);
+		const result = await tool.handler(args);
+		return currentEntry ? this.tagWorkspaceResult(result, currentEntry.id) : result;
 	}
 
 	protected async listResources(extra?: ServerRequestExtra): Promise<ListResourcesResult> {

@@ -3,7 +3,9 @@ import { join } from "node:path";
 import { Core } from "../core/backlog.ts";
 import { serializeTask } from "../markdown/serializer.ts";
 import type { Task } from "../types/index.ts";
+import { generateDetailContent } from "../ui/task-viewer-with-search.ts";
 import {
+	applyUnifiedTaskUpdate,
 	createTaskFromBoard,
 	createUnifiedTaskUpdateCallbacks,
 	getDuplicateTaskStartupWarning,
@@ -200,5 +202,44 @@ describe("loadTasksForUnifiedView", () => {
 		expect(state.tasks).toEqual([first, added]);
 		expect(state.selectedTask).toBe(added);
 		expect(published).toHaveLength(3);
+	});
+
+	it("keeps duplicate task IDs separated by workspace identity", () => {
+		const makeTask = (workspaceId: string): Task =>
+			({
+				id: "TASK-1",
+				title: workspaceId,
+				status: "To Do",
+				assignee: [],
+				createdDate: "2026-07-14",
+				labels: [],
+				dependencies: [],
+				workspaceId,
+			}) as Task;
+		const first = makeTask("a");
+		const second = makeTask("b");
+		const state = applyUnifiedTaskUpdate(
+			{ tasks: [first, second], selectedTask: second },
+			{ type: "upsert", task: { ...second, title: "updated" } as Task },
+		);
+		expect(state.tasks.map((task) => [(task as Task & { workspaceId: string }).workspaceId, task.title])).toEqual([
+			["a", "a"],
+			["b", "updated"],
+		]);
+		expect((state.selectedTask as Task & { workspaceId: string }).workspaceId).toBe("b");
+	});
+
+	it("shows workspace identity in duplicate-task details", () => {
+		const detail = generateDetailContent({
+			id: "TASK-1",
+			title: "Second root",
+			status: "To Do",
+			assignee: [],
+			createdDate: "2026-07-14",
+			labels: [],
+			dependencies: [],
+			workspaceId: "b",
+		} as Task);
+		expect(detail.headerContent[0]).toContain("[b]");
 	});
 });

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
 import { getTestCliPath } from "./test-cli.ts";
-import { createUniqueTestDir, initializeTestProject, isWindows, safeCleanup } from "./test-utils.ts";
+import { createTestDirOutsideRepository, initializeTestProject, isWindows, safeCleanup } from "./test-utils.ts";
 
 const CLI_PATH = getTestCliPath();
 
@@ -23,6 +23,20 @@ let decisionsDir: string;
 
 function cli(...args: string[]) {
 	return $`bun ${CLI_PATH} ${args}`.cwd(TEST_DIR).quiet().nothrow();
+}
+
+async function cliWithArgv(...args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+	const child = Bun.spawn(["bun", CLI_PATH, ...args], {
+		cwd: TEST_DIR,
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const [exitCode, stdout, stderr] = await Promise.all([
+		child.exited,
+		new Response(child.stdout).text(),
+		new Response(child.stderr).text(),
+	]);
+	return { exitCode, stdout, stderr };
 }
 
 function changeStatus(decisionId: string, status: string) {
@@ -117,8 +131,7 @@ const refusedCases = [
 
 describe("changing a decision's status from the CLI", () => {
 	beforeEach(async () => {
-		TEST_DIR = createUniqueTestDir("test-decision-status");
-		await mkdir(TEST_DIR, { recursive: true });
+		TEST_DIR = await createTestDirOutsideRepository("test-decision-status");
 		await $`git init -b main`.cwd(TEST_DIR).quiet();
 		await initializeTestProject(new Core(TEST_DIR), "Decision Status Test");
 		decisionsDir = join(TEST_DIR, "backlog", "decisions");
@@ -321,10 +334,17 @@ describe("changing a decision's status from the CLI", () => {
 		await cli("decision", "create", "Use Postgres", "-s", "accepted");
 		const before = await snapshotDecisions();
 
-		for (const result of [await cli(...CHANGE_STATUS, "decision-1"), await changeStatus("decision-1", "")]) {
-			expect(result.exitCode).toBe(1);
-			expect(result.stderr.toString()).toContain("Status is required.");
-		}
+		const absentStatus = await cli(...CHANGE_STATUS, "decision-1");
+		expect(absentStatus.exitCode).toBe(1);
+		expect(absentStatus.stderr.toString()).toContain("Status is required.");
+
+		const missingStatus = await cli(...CHANGE_STATUS, "decision-1", STATUS_FLAG);
+		expect(missingStatus.exitCode).toBe(1);
+		expect(missingStatus.stderr.toString()).toContain("argument missing");
+
+		const emptyStatus = await cliWithArgv(...CHANGE_STATUS, "decision-1", STATUS_FLAG, "");
+		expect(emptyStatus.exitCode).toBe(1);
+		expect(emptyStatus.stderr).toContain("Status is required.");
 		expect(await snapshotDecisions()).toEqual(before);
 	});
 

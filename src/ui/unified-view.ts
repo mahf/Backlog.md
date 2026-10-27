@@ -2,6 +2,7 @@
  * Unified view manager that handles Tab switching between task views and kanban board
  */
 
+import type { ScreenInterface } from "neo-neo-bblessed";
 import type { Core } from "../core/backlog.ts";
 import { findLocalDuplicateTaskIds } from "../core/duplicate-task-repair.ts";
 import type { LabelMatchMode, Milestone, Task, TaskCreateInput } from "../types/index.ts";
@@ -10,7 +11,7 @@ import { formatDuplicateTaskIdSummary } from "../utils/duplicate-detection.ts";
 import { collectAvailableLabels } from "../utils/label-filter.ts";
 import { hasAnyPrefix } from "../utils/prefix-config.ts";
 import { type TaskWatcherCallbacks, watchTasks } from "../utils/task-watcher.ts";
-import { renderBoardTui } from "./board.ts";
+import { type BoardWorkspaceScope, renderBoardTui } from "./board.ts";
 import { createLoadingScreen } from "./loading.ts";
 import { buildTaskViewerMilestoneFilterModel, viewTaskEnhanced } from "./task-viewer-with-search.ts";
 import { keepTuiInputAlive } from "./tui.ts";
@@ -50,6 +51,17 @@ export interface UnifiedViewOptions {
 	};
 	milestoneMode?: boolean;
 	milestoneEntities?: Milestone[];
+	readOnly?: boolean;
+	workspaceId?: string;
+	getWorkspaceId?: () => string | undefined;
+	workspaceScopes?: BoardWorkspaceScope[];
+	workspaceCores?: Map<string, Core>;
+	resolveTaskCore?: (task: Task) => Core | undefined;
+	onWorkspaceSwitch?: (scope: BoardWorkspaceScope) => void | Promise<void>;
+	onOpenWorkflowInbox?: (screen: ScreenInterface) => void | Promise<void>;
+	editTask?: NonNullable<Parameters<typeof renderBoardTui>[4]>["editTask"];
+	moveTask?: NonNullable<Parameters<typeof renderBoardTui>[4]>["moveTask"];
+	createTask?: NonNullable<Parameters<typeof renderBoardTui>[4]>["createTask"];
 }
 
 type LoadingScreen = {
@@ -67,7 +79,16 @@ export interface UnifiedViewLoadResult {
 	readinessTasks?: Task[];
 }
 
-export type UnifiedTaskUpdate = { type: "upsert"; task: Task } | { type: "remove"; taskId: string };
+export type UnifiedTaskUpdate =
+	| { type: "upsert"; task: Task }
+	| { type: "remove"; taskId: string; workspaceId?: string };
+
+function sameTaskIdentity(left: Task, right: Task): boolean {
+	return (
+		left.id === right.id &&
+		(left as Task & { workspaceId?: string }).workspaceId === (right as Task & { workspaceId?: string }).workspaceId
+	);
+}
 
 export interface UnifiedTaskState {
 	tasks: Task[];
@@ -76,21 +97,36 @@ export interface UnifiedTaskState {
 
 export function applyUnifiedTaskUpdate(state: UnifiedTaskState, update: UnifiedTaskUpdate): UnifiedTaskState {
 	if (update.type === "upsert") {
-		const index = state.tasks.findIndex((task) => task.id === update.task.id);
+		const index = state.tasks.findIndex((task) => sameTaskIdentity(task, update.task));
 		const tasks = [...state.tasks];
 		if (index === -1) tasks.push(update.task);
 		else tasks[index] = update.task;
 		return {
 			tasks,
-			selectedTask: state.selectedTask?.id === update.task.id ? update.task : state.selectedTask,
+			selectedTask:
+				state.selectedTask && sameTaskIdentity(state.selectedTask, update.task) ? update.task : state.selectedTask,
 		};
 	}
 
-	const removedIndex = state.tasks.findIndex((task) => task.id === update.taskId);
+	const removedIndex = state.tasks.findIndex(
+		(task) =>
+			task.id === update.taskId &&
+			(update.workspaceId === undefined ||
+				(task as Task & { workspaceId?: string }).workspaceId === update.workspaceId),
+	);
 	if (removedIndex === -1) return state;
-	const tasks = state.tasks.filter((task) => task.id !== update.taskId);
+	const tasks = state.tasks.filter(
+		(task) =>
+			!(
+				task.id === update.taskId &&
+				(update.workspaceId === undefined ||
+					(task as Task & { workspaceId?: string }).workspaceId === update.workspaceId)
+			),
+	);
 	const selectedTask =
-		state.selectedTask?.id === update.taskId
+		state.selectedTask?.id === update.taskId &&
+		(update.workspaceId === undefined ||
+			(state.selectedTask as Task & { workspaceId?: string }).workspaceId === update.workspaceId)
 			? tasks[Math.min(removedIndex, Math.max(tasks.length - 1, 0))]
 			: state.selectedTask;
 	return { tasks, selectedTask };
@@ -99,12 +135,13 @@ export function applyUnifiedTaskUpdate(state: UnifiedTaskState, update: UnifiedT
 export function createUnifiedTaskUpdateCallbacks(
 	getState: () => UnifiedTaskState,
 	onStateChanged: (state: UnifiedTaskState) => void,
+	workspaceId?: string,
 ): TaskWatcherCallbacks {
 	const publish = (update: UnifiedTaskUpdate) => onStateChanged(applyUnifiedTaskUpdate(getState(), update));
 	return {
-		onTaskAdded: (task) => publish({ type: "upsert", task }),
-		onTaskChanged: (task) => publish({ type: "upsert", task }),
-		onTaskRemoved: (taskId) => publish({ type: "remove", taskId }),
+		onTaskAdded: (task) => publish({ type: "upsert", task: workspaceId ? ({ ...task, workspaceId } as Task) : task }),
+		onTaskChanged: (task) => publish({ type: "upsert", task: workspaceId ? ({ ...task, workspaceId } as Task) : task }),
+		onTaskRemoved: (taskId) => publish({ type: "remove", taskId, workspaceId }),
 	};
 }
 
@@ -187,13 +224,13 @@ export function mergeUnifiedViewFilters(
 
 export async function loadTasksForUnifiedView(
 	core: Core,
-	options: Pick<UnifiedViewOptions, "tasks" | "tasksLoader" | "loadingScreenFactory">,
+	options: Pick<UnifiedViewOptions, "tasks" | "tasksLoader" | "loadingScreenFactory" | "preloadedKanbanData">,
 ): Promise<UnifiedViewLoadResult> {
 	if (options.tasks && options.tasks.length > 0) {
 		const config = await core.filesystem.loadConfig();
 		return {
 			tasks: options.tasks,
-			statuses: config?.statuses || ["To Do", "In Progress", "Done"],
+			statuses: options.preloadedKanbanData?.statuses || config?.statuses || ["To Do", "In Progress", "Done"],
 		};
 	}
 
@@ -265,6 +302,7 @@ export async function runUnifiedView(options: UnifiedViewOptions): Promise<void>
 			tasks: options.tasks,
 			tasksLoader: options.tasksLoader,
 			loadingScreenFactory: options.loadingScreenFactory,
+			preloadedKanbanData: options.preloadedKanbanData,
 		});
 
 		const startupWarning = await getDuplicateTaskStartupWarning(options.core);
@@ -310,6 +348,7 @@ export async function runUnifiedView(options: UnifiedViewOptions): Promise<void>
 			| null = null;
 
 		const getRenderableTasks = () => tasks.filter((task) => task.id && task.id.trim() !== "" && hasAnyPrefix(task.id));
+		const taskWorkspaceId = (task: Task) => (task as Task & { workspaceId?: string }).workspaceId;
 		const getBoardAvailableLabels = () => collectAvailableLabels(getRenderableTasks(), configuredLabels);
 		const getBoardAvailableMilestones = () => [...milestoneFilterModel.availableMilestoneTitles];
 
@@ -343,8 +382,36 @@ export async function runUnifiedView(options: UnifiedViewOptions): Promise<void>
 			core: options.core,
 			initialState,
 		});
-		const watcher = watchTasks(options.core, taskUpdateCallbacks, baseTasks);
-		process.on("exit", () => watcher.stop());
+		const watcherStops = [...(options.workspaceCores?.entries() ?? [[options.workspaceId, options.core] as const])].map(
+			([workspaceId, watcherCore]) =>
+				watchTasks(
+					watcherCore,
+					createUnifiedTaskUpdateCallbacks(
+						() => ({ tasks, selectedTask }),
+						(next) => {
+							tasks = next.tasks;
+							selectedTask = next.selectedTask;
+							const state = viewSwitcher?.getState();
+							viewSwitcher?.updateState({
+								tasks,
+								selectedTask,
+								kanbanData: state?.kanbanData ? { ...state.kanbanData, tasks } : undefined,
+							});
+							emitBoardUpdate();
+							emitTaskListUpdate();
+						},
+						workspaceId,
+					),
+					baseTasks.filter(
+						(task) => !workspaceId || (task as Task & { workspaceId?: string }).workspaceId === workspaceId,
+					),
+				),
+		);
+		process.on("exit", () => {
+			watcherStops.forEach((watcher) => {
+				watcher.stop();
+			});
+		});
 
 		const configWatcher = watchConfig(options.core, {
 			onConfigChanged: (config) => {
@@ -367,7 +434,11 @@ export async function runUnifiedView(options: UnifiedViewOptions): Promise<void>
 
 			// Without a chosen task the list starts on its first row. The viewer still needs a task
 			// to open with, and only it knows the order of its rows.
-			const chosenTask = selectedTask?.id ? availableTasks.find((t) => t.id === selectedTask?.id) : undefined;
+			const selectedWorkspaceId = selectedTask ? taskWorkspaceId(selectedTask) : undefined;
+			const selectedTaskId = selectedTask?.id;
+			const chosenTask = selectedTaskId
+				? availableTasks.find((t) => t.id === selectedTaskId && taskWorkspaceId(t) === selectedWorkspaceId)
+				: undefined;
 			const taskToView = chosenTask ?? availableTasks[0];
 
 			if (!taskToView) {
@@ -392,7 +463,9 @@ export async function runUnifiedView(options: UnifiedViewOptions): Promise<void>
 
 				viewTaskEnhanced(taskToView, {
 					tasks: availableTasks,
-					core: options.core,
+					core: options.resolveTaskCore?.(taskToView as Task) ?? options.core,
+					resolveTaskCore: options.resolveTaskCore,
+					readOnly: options.readOnly,
 					title: options.filter?.title,
 					filterDescription: options.filter?.filterDescription,
 					searchQuery: currentFilters.searchQuery,
@@ -437,11 +510,14 @@ export async function runUnifiedView(options: UnifiedViewOptions): Promise<void>
 
 		// Function to show kanban view
 		const showKanbanView = async (): Promise<ViewResult> => {
-			const config = await options.core.filesystem.loadConfig();
+			const activeWorkspaceId = options.getWorkspaceId?.();
+			const activeCore =
+				(activeWorkspaceId ? options.workspaceCores?.get(activeWorkspaceId) : undefined) ?? options.core;
+			const config = await activeCore.filesystem.loadConfig();
 			configuredLabels = config?.labels ?? configuredLabels;
 			const layout = "horizontal" as const;
 			const maxColumnWidth = config?.maxColumnWidth || 20;
-			milestoneEntities = await options.core.filesystem.listMilestones();
+			milestoneEntities = await activeCore.filesystem.listMilestones();
 			milestoneFilterModel = buildTaskViewerMilestoneFilterModel(milestoneEntities);
 			const kanbanTasks = getRenderableTasks();
 			const statuses = kanbanStatuses;
@@ -455,7 +531,21 @@ export async function runUnifiedView(options: UnifiedViewOptions): Promise<void>
 				};
 
 				renderBoardTui(kanbanTasks, statuses, layout, maxColumnWidth, {
-					core: options.core,
+					core: activeCore,
+					readOnly: options.readOnly,
+					workspaceId: options.getWorkspaceId?.() ?? options.workspaceId,
+					workspaceCores: options.workspaceCores,
+					workspaceScopes: options.workspaceScopes,
+					onWorkspaceSwitch: async (scope) => {
+						tasks = scope.tasks;
+						kanbanStatuses = scope.statuses;
+						selectedTask = undefined;
+						options.onWorkspaceSwitch && (await options.onWorkspaceSwitch(scope));
+						emitTaskListUpdate();
+					},
+					onOpenWorkflowInbox: options.onOpenWorkflowInbox,
+					editTask: options.editTask,
+					moveTask: options.moveTask,
 					onTaskSelect: (task) => {
 						selectedTask = task;
 					},
@@ -491,7 +581,10 @@ export async function runUnifiedView(options: UnifiedViewOptions): Promise<void>
 					types: config?.types,
 					projects: config?.projects,
 					hideEmptyColumns: config?.hideEmptyColumns ?? false,
-					createTask: async (input) => createTaskFromBoard(options.core, input, taskUpdateCallbacks.onTaskAdded),
+					selectedTask,
+					createTask:
+						options.createTask ??
+						(async (input) => createTaskFromBoard(options.core, input, taskUpdateCallbacks.onTaskAdded)),
 				}).then(() => {
 					// If user wants to exit, do it immediately
 					if (result === "exit") {

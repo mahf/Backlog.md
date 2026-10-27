@@ -1,0 +1,29 @@
+[benchmark] fixture 0
+[benchmark] fixture 5
+[benchmark] fixture 10
+[benchmark] fixture 15
+[benchmark] fixture 20
+[benchmark] fixture 25
+[benchmark] registered 30 workspaces; starting HTTP server
+[benchmark] HTTP server ready on http://127.0.0.1:52374
+[benchmark] roots=30 repeat=1/5 starting
+[benchmark] warm-up: 400/3000 tasks, 26 errors
+[benchmark] warm-up: 0/3000 tasks, 30 errors
+[benchmark] warm-up: 0/3000 tasks, 30 errors
+[benchmark] warm-up: 0/3000 tasks, 30 errors
+[benchmark] warm-up: 200/3000 tasks, 28 errors
+[benchmark] warm-up: 600/3000 tasks, 24 errors
+[benchmark] warm-up: 1400/3000 tasks, 16 errors
+[benchmark] warm-up: 2200/3000 tasks, 8 errors
+[benchmark] roots=30 repeat=1/5 natural=1037.6ms
+ 98 | 			const root = projects[next++];
+ 99 | 			if (!root) return;
+100 | 			const cache = caches.get(root) ?? new WorkspaceQueryCache<WorkflowCommandResult>({ ttlMs: 60_000, watch: false });
+101 | 			caches.set(root, cache);
+102 | 			const result = await cache.get(root, () => invoke(["board", "--plain"], { root, enabled: true, rq }));
+103 | 			if (result.exitCode !== 0) throw new Error(`rq board failed for ${root}: ${result.stderr || result.stdout}`);
+                                              ^
+error: rq board failed for C:\Users\haifeng.ma\AppData\Local\Temp\backlog-workspace-benchmark-weIill\project-5: Read-only workflow board timed out.
+      at <anonymous> (D:\TMP\backlog.md\Backlog.md\scripts\workspace-benchmark.ts:103:41)
+
+Bun v1.3.10 (Windows x64)

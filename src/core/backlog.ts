@@ -1,4 +1,4 @@
-import { mkdir, rename as moveFile, readFile, stat, unlink } from "node:fs/promises";
+import { mkdir, rename as moveFile, readFile, realpath, stat, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import {
 	ARCHIVED_TASK_DIRECTORIES,
@@ -130,6 +130,8 @@ import {
 	getBranchHistoryCutoff,
 	getTaskLoadingMessage,
 } from "./task-loader.ts";
+import { assertWorkflowLifecycleAllowed, assertWorkflowTerminalTransition } from "./workflow-gate.ts";
+import { listWorkspaces } from "./workspace-registry.ts";
 
 interface BlessedScreen {
 	program: {
@@ -681,6 +683,17 @@ export class Core {
 		// Interactive modes (TUI, browser, MCP) should explicitly pass enableWatchers: true
 		this.enableWatchers = options?.enableWatchers ?? false;
 		// Note: Config is loaded lazily when needed since constructor can't be async
+	}
+
+	private async assertWorkspaceWritable(): Promise<void> {
+		const canonicalRoot = await realpath(this.fs.rootDir);
+		const rootKey = process.platform === "win32" ? canonicalRoot.toLowerCase() : canonicalRoot;
+		const workspace = (await listWorkspaces()).find((entry) => {
+			const entryKey = process.platform === "win32" ? entry.rootPath.toLowerCase() : entry.rootPath;
+			return entryKey === rootKey;
+		});
+		if (workspace?.error) throw new Error(`Workspace ${workspace.id} is unavailable: ${workspace.error}`);
+		if (workspace && !workspace.writable) throw new Error(`Workspace ${workspace.id} is read-only.`);
 	}
 
 	private async buildTaskIdentityIndex(
@@ -2165,6 +2178,7 @@ export class Core {
 	}
 
 	async createTaskFromInput(input: TaskCreateInput, autoCommit?: boolean): Promise<{ task: Task; filePath?: string }> {
+		await this.assertWorkspaceWritable();
 		if (!input.title || input.title.trim().length === 0) {
 			throw new Error("Title is required to create a task.");
 		}
@@ -2282,6 +2296,7 @@ export class Core {
 				...(acceptanceCriteriaItems.length > 0 && { acceptanceCriteriaItems }),
 				...(definitionOfDoneItems && definitionOfDoneItems.length > 0 && { definitionOfDoneItems }),
 			};
+			if (!isDraft) await assertWorkflowTerminalTransition(this.fs.rootDir, config, null, task);
 
 			const targetPath = await this.fs.getTaskWritePath(task, isDraft);
 			const previousIndexEntries = autoCommitEnabled ? await this.git.getIndexEntries(targetPath) : undefined;
@@ -2342,10 +2357,12 @@ export class Core {
 	}
 
 	async createTask(task: Task, autoCommit?: boolean): Promise<string> {
+		await this.assertWorkspaceWritable();
+		const config = await this.fs.loadConfig();
 		if (!task.status) {
-			const config = await this.fs.loadConfig();
 			task.status = config?.defaultStatus || FALLBACK_STATUS;
 		}
+		await assertWorkflowTerminalTransition(this.fs.rootDir, config, null, task);
 
 		const autoCommitEnabled = await this.shouldAutoCommit(autoCommit);
 		const filepath = await this.writePreparedTask(task, false);
@@ -2376,6 +2393,7 @@ export class Core {
 	 * object the caller holds, so an archived task cannot be written through this method either.
 	 */
 	async updateTask(task: Task, autoCommit?: boolean): Promise<string> {
+		await this.assertWorkspaceWritable();
 		normalizeAssignee(task);
 
 		// The stored record also tells whether the status changed, for the status callback.
@@ -2383,6 +2401,7 @@ export class Core {
 		const oldStatus = originalTask?.status ?? "";
 		const newStatus = task.status ?? "";
 		const statusChanged = oldStatus !== newStatus;
+		await assertWorkflowTerminalTransition(this.fs.rootDir, await this.fs.loadConfig(), originalTask, task);
 
 		if (hasUpdatedDateRelevantChanges(originalTask, task)) {
 			task.updatedDate = formatUtcTimestamp();
@@ -3021,6 +3040,7 @@ export class Core {
 		autoCommit?: boolean,
 		options: TaskReadOptions = {},
 	): Promise<Task> {
+		await this.assertWorkspaceWritable();
 		const task = await this.loadTaskForMutation(taskId, options);
 		if (!task) {
 			throw new Error(`Task not found: ${taskId}`);
@@ -3056,6 +3076,7 @@ export class Core {
 	}
 
 	async updateDraft(task: Task, autoCommit?: boolean): Promise<string> {
+		await this.assertWorkspaceWritable();
 		// Drafts always keep status Draft
 		task.status = "Draft";
 		normalizeAssignee(task);
@@ -3084,6 +3105,7 @@ export class Core {
 		input: TaskUpdateInput,
 		autoCommit?: boolean,
 	): Promise<Task> {
+		await this.assertWorkspaceWritable();
 		// Same discipline as task edits: acquire the namespaced per-file lock before the
 		// read-modify-write and re-read inside it, so a concurrent editor fails fast instead of
 		// losing its update. The reference's own file is the only thing touched; no id is ever
@@ -3118,6 +3140,7 @@ export class Core {
 		autoCommit?: boolean,
 		options: TaskReadOptions = {},
 	): Promise<TaskEditResult> {
+		await this.assertWorkspaceWritable();
 		const resolvedDraft = await this.fs.resolveDraftReference(taskId);
 		if (resolvedDraft) {
 			const requestedStatus = input.status?.trim();
@@ -3151,6 +3174,7 @@ export class Core {
 		}
 
 		const canonicalStatus = await this.requireCanonicalStatus(targetStatus);
+		const config = await this.fs.loadConfig();
 
 		// Same locked read-apply-promote discipline as edit/promote: hold the draft lock across
 		// the whole span and re-read inside it, so a concurrent editor cannot be omitted from the
@@ -3185,6 +3209,7 @@ export class Core {
 					filePath: undefined,
 					...(mutated || draft.status !== canonicalStatus ? { updatedDate: formatUtcTimestamp() } : {}),
 				};
+				await assertWorkflowTerminalTransition(this.fs.rootDir, config, null, promotedTask);
 
 				normalizeAssignee(promotedTask);
 				const savedPath = await this.fs.saveTask(promotedTask, await Bun.file(current.filePath).text());
@@ -3222,6 +3247,7 @@ export class Core {
 		autoCommit?: boolean,
 		options: TaskReadOptions = {},
 	): Promise<TaskEditResult> {
+		await assertWorkflowLifecycleAllowed(this.fs.rootDir, await this.fs.loadConfig(), task, "demote");
 		// Editing a task into the Draft status vacates its ID just as `task demote` does, so it
 		// runs the same cleanup rather than leaving dependents pointing at the freed ID.
 		return await this.withVacatedIdCleanup(task, task.id, async (cleanup) => {
@@ -3364,6 +3390,7 @@ export class Core {
 	}
 
 	async updateTasksBulk(tasks: Task[], commitMessage?: string, autoCommit?: boolean): Promise<void> {
+		await this.assertWorkspaceWritable();
 		const filePaths = await this.fs.withTaskLocks(tasks, async () => await this.writeTasksBulk(tasks));
 
 		// Commit all changes at once if auto-commit is enabled
@@ -3427,6 +3454,7 @@ export class Core {
 		autoCommit?: boolean;
 		defaultStep?: number;
 	}): Promise<{ updatedTask: Task; changedTasks: Task[] }> {
+		await this.assertWorkspaceWritable();
 		const taskId = normalizeTaskId(String(params.taskId || "").trim());
 		const targetStatus = String(params.targetStatus || "").trim();
 		const orderedTaskIds = params.orderedTaskIds.map((id) => normalizeTaskId(String(id || "").trim())).filter(Boolean);
@@ -3549,6 +3577,7 @@ export class Core {
 		autoCommit?: boolean;
 		defaultStep?: number;
 	}): Promise<{ movedTasks: Task[]; changedTasks: Task[]; failures: Array<{ taskId: string; reason: string }> }> {
+		await this.assertWorkspaceWritable();
 		const targetStatus = String(params.targetStatus || "").trim();
 		if (!targetStatus) throw new Error("targetStatus is required");
 		const defaultStep = params.defaultStep ?? DEFAULT_ORDINAL_STEP;
@@ -3782,11 +3811,13 @@ export class Core {
 	 * archived already, it exists only on another branch, or the archive has a file of its name.
 	 */
 	async archiveTask(taskId: string, autoCommit?: boolean, options: TaskReadOptions = {}): Promise<boolean> {
+		await this.assertWorkspaceWritable();
 		const task = await this.loadTaskForMutation(taskId, options);
 		if (!task) {
 			await this.refuseTaskOnOtherBranch(taskId, options);
 			return false;
 		}
+		await assertWorkflowLifecycleAllowed(this.fs.rootDir, await this.fs.loadConfig(), task, "archive");
 
 		return await this.fs.withTaskLock(task, () =>
 			this.withCreateLock(async () => {
@@ -3834,8 +3865,10 @@ export class Core {
 	 * file is removed. A failure after removal reports that deletion already happened.
 	 */
 	async deleteTask(taskId: string, autoCommit?: boolean, options: TaskReadOptions = {}): Promise<VacatedTaskResult> {
+		await this.assertWorkspaceWritable();
 		const task = await this.loadArchivedTask(taskId, "delete", options);
 		if (!task) return { success: false, cleanedTaskIds: [] };
+		await assertWorkflowLifecycleAllowed(this.fs.rootDir, await this.fs.loadConfig(), task, "delete");
 		const autoCommitEnabled = await this.shouldAutoCommit(autoCommit);
 		let deletionApplied = false;
 		let failureStep = "finishing the deletion";
@@ -3899,8 +3932,10 @@ export class Core {
 	 * already on the board, it exists only on another branch, or the board has a file of its name.
 	 */
 	async restoreTask(taskId: string, autoCommit?: boolean, options: TaskReadOptions = {}): Promise<boolean> {
+		await this.assertWorkspaceWritable();
 		const task = await this.loadArchivedTask(taskId, "restore", options);
 		if (!task) return false;
+		await assertWorkflowLifecycleAllowed(this.fs.rootDir, await this.fs.loadConfig(), task, "restore");
 
 		return await this.fs.withTaskLock(task, () =>
 			this.withCreateLock(async () => {
@@ -4116,6 +4151,7 @@ export class Core {
 					// over the source file, and removing the source afterwards would delete the only copy.
 					filePath: undefined,
 				};
+				await assertWorkflowTerminalTransition(this.fs.rootDir, config, null, promotedTask);
 
 				normalizeAssignee(promotedTask);
 				const savedPath = await this.fs.saveTask(promotedTask, await Bun.file(sourcePath).text());
@@ -4142,8 +4178,10 @@ export class Core {
 	}
 
 	async demoteTask(taskId: string, autoCommit?: boolean, options: TaskReadOptions = {}): Promise<VacatedTaskResult> {
+		await this.assertWorkspaceWritable();
 		const task = await this.loadTaskForMutation(taskId, options);
 		if (!task) return { success: false, cleanedTaskIds: [] };
+		await assertWorkflowLifecycleAllowed(this.fs.rootDir, await this.fs.loadConfig(), task, "demote");
 		// Direct demotion is a read-modify-write too. Hold the task lock across the
 		// filesystem read and move so an in-flight task update cannot recreate the
 		// active file after this operation has written the draft. The record demoted here also
