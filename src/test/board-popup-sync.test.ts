@@ -78,6 +78,7 @@ async function withBoardPopup(
 		startColumn?: number;
 		/** Rows to step down before opening the popup. */
 		startRow?: number;
+		openKey?: "enter" | "linefeed";
 	},
 	run: (context: {
 		screen: ScreenInterface & EmittingWidget;
@@ -114,7 +115,7 @@ async function withBoardPopup(
 		}
 
 		// Open the popup on the selected task in the focused column.
-		pressKey(screen, "enter");
+		pressKey(screen, options.openKey ?? "enter");
 		await Bun.sleep(30);
 		expect(findPopupBody(screen)).toBeDefined();
 

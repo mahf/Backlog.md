@@ -5289,6 +5289,7 @@ addHelpSchema(docCmd.command("view <docId>"), {
 			const content = await core.getDocumentViewText(docId);
 			if (content === null) {
 				console.error(`Document ${docId} not found.`);
+				process.exitCode = 1;
 				return;
 			}
 			const usePlainOutput = isPlainRequested(options) || shouldAutoPlain;
@@ -5298,9 +5299,9 @@ addHelpSchema(docCmd.command("view <docId>"), {
 			}
 			await scrollableViewer(content);
 		} catch (error) {
+			process.exitCode = 1;
 			if (isAmbiguousIdError(error)) {
 				console.error(error.message);
-				process.exitCode = 1;
 				return;
 			}
 			console.error(`Document ${docId} not found.`);
