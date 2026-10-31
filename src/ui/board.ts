@@ -477,7 +477,10 @@ export async function renderBoardTui(
 			renderView();
 		};
 		const configuredTaskTypes = getTaskTypeValues(options?.types);
-		const configuredProjects = getProjectValues(options?.projects);
+		// With several workspaces, "Project" filters by workspace name.
+		const workspaceNames = (options?.workspaceScopes ?? []).map((scope) => scope.name);
+		const filterByWorkspace = workspaceNames.length > 1;
+		const configuredProjects = filterByWorkspace ? workspaceNames : getProjectValues(options?.projects);
 		const sharedFilters = {
 			searchQuery: options?.filters?.searchQuery ?? "",
 			excludeStatus: [...(options?.filters?.excludeStatus ?? [])],
@@ -554,7 +557,7 @@ export async function renderBoardTui(
 						query: sharedFilters.searchQuery,
 						excludeStatus: sharedFilters.excludeStatus,
 						type: sharedFilters.typeFilter,
-						project: sharedFilters.projectFilter,
+						project: filterByWorkspace ? [] : sharedFilters.projectFilter,
 						priority: sharedFilters.priorityFilter || undefined,
 						labels: sharedFilters.labelFilter,
 						labelMatch: sharedFilters.labelMatch,
@@ -563,6 +566,13 @@ export async function renderBoardTui(
 					},
 					searchIndex,
 				);
+			}
+			if (filterByWorkspace && sharedFilters.projectFilter.length > 0) {
+				const names = new Set(sharedFilters.projectFilter);
+				filteredTasks = filteredTasks.filter((task) => {
+					const scope = options?.workspaceScopes?.find((candidate) => candidate.id === taskWorkspaceId(task));
+					return scope ? names.has(scope.name) : false;
+				});
 			}
 			// A limit keeps the tasks the task list shows for it: the first ones of the sorted list.
 			return sharedFilters.limit !== undefined

@@ -4720,9 +4720,13 @@ async function handleBoardView(options: {
 }) {
 	const inherited = program.opts<{ workspace?: string; allWorkspaces?: boolean }>();
 	const workspace = options.workspace ?? inherited.workspace;
-	const allWorkspaces = options.allWorkspaces ?? inherited.allWorkspaces;
-	const currentRoot = workspace || allWorkspaces ? process.cwd() : await requireProjectRoot();
 	const entries = await listQueryWorkspaces();
+	// Interactive board aggregates every registered workspace unless one is chosen explicitly.
+	const allWorkspaces =
+		options.allWorkspaces ??
+		inherited.allWorkspaces ??
+		(!workspace && !options.json && !options.plain && entries.some((entry) => !entry.error));
+	const currentRoot = workspace || allWorkspaces ? process.cwd() : await requireProjectRoot();
 	const selected = workspace ? entries.find((entry) => entry.id === workspace) : undefined;
 	if (workspace && !selected) throw new Error(`Workspace not found: ${workspace}`);
 	if (selected?.error) throw new Error(`Workspace ${selected.id} is unavailable: ${selected.error}`);
