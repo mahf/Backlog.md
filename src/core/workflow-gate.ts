@@ -102,8 +102,9 @@ export async function assertWorkflowTerminalTransition(
 		);
 	}
 	await assertBoardIdentity(root, config, next, previous);
-	const args = ["accept"];
-	if (next.milestone) args.push("--milestone", next.milestone);
+	// Completion is a task-scoped transition. Milestone/project acceptance remains
+	// an explicit `rq accept --milestone ...` operation for callers that request it.
+	const args = ["accept", next.id];
 	const result = await runWorkflow(args, {
 		root,
 		enabled: true,

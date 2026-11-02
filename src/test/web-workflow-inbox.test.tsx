@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { JSDOM } from "jsdom";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useNavigate } from "react-router-dom";
 import WorkflowInbox from "../web/components/WorkflowInbox.tsx";
 import WorkflowTaskFacts from "../web/components/WorkflowTaskFacts.tsx";
 import { apiClient } from "../web/lib/api.ts";
@@ -560,6 +560,114 @@ describe("WorkflowInbox", () => {
 		expect((document.querySelector("textarea") as HTMLTextAreaElement).value).toBe("Keep during refresh");
 	});
 
+	it("shows initial loading and serializes a manual refresh", async () => {
+		setup({ requests: [] });
+		let releaseInitial!: (response: Response) => void;
+		let releaseManual!: (response: Response) => void;
+		let reads = 0;
+		const intervalCallbacks: Array<() => void> = [];
+		dom!.window.setInterval = ((callback: TimerHandler) => {
+			intervalCallbacks.push(callback as () => void);
+			return 1 as unknown as number;
+		}) as unknown as typeof window.setInterval;
+		globalThis.fetch = (async () => {
+			reads += 1;
+			if (reads === 1) return await new Promise<Response>((resolve) => (releaseInitial = resolve));
+			if (reads === 2) return await new Promise<Response>((resolve) => (releaseManual = resolve));
+			return new Response(JSON.stringify({ requests: [] }), { status: 200 });
+		}) as unknown as typeof fetch;
+		root = createRoot(document.getElementById("root")!);
+		await act(async () => {
+			root?.render(
+				<MemoryRouter initialEntries={["/?workspace=alpha"]}>
+					<WorkflowInbox workspaces={[{ id: "alpha", name: "Alpha", writable: true }]} />
+				</MemoryRouter>,
+			);
+			await Promise.resolve();
+		});
+		expect(document.querySelector('[role="status"]')?.textContent).toContain("Loading workflow");
+		intervalCallbacks[0]?.();
+		intervalCallbacks[0]?.();
+		await act(async () => await Promise.resolve());
+		expect(reads).toBe(1);
+		const refresh = Array.from(document.querySelectorAll("button")).find(
+			(button) => button.textContent === "Refresh",
+		) as HTMLButtonElement;
+		expect(refresh.disabled).toBe(true);
+		releaseInitial(new Response(JSON.stringify({ requests: [] }), { status: 200 }));
+		await act(async () => {
+			await new Promise((resolve) => setTimeout(resolve, 0));
+		});
+		await act(async () => {
+			refresh.click();
+			await Promise.resolve();
+		});
+		expect(refresh.textContent).toBe("Refreshing...");
+		expect(refresh.disabled).toBe(true);
+		releaseManual(new Response(JSON.stringify({ requests: [] }), { status: 200 }));
+		await act(async () => {
+			await new Promise((resolve) => setTimeout(resolve, 0));
+		});
+		expect(reads).toBe(2);
+	});
+
+	it("does not let an old A scope request overwrite a newer A scope", async () => {
+		setup({ requests: [] });
+		const pending: Array<(response: Response) => void> = [];
+		globalThis.fetch = (async () =>
+			new Promise<Response>((resolve) => pending.push(resolve))) as unknown as typeof fetch;
+		root = createRoot(document.getElementById("root")!);
+		let navigate!: ReturnType<typeof useNavigate>;
+		const Harness = () => {
+			navigate = useNavigate();
+			return <WorkflowInbox workspaces={[{ id: "alpha", name: "Alpha", writable: true }]} />;
+		};
+		await act(async () => {
+			root?.render(
+				<MemoryRouter initialEntries={["/?workspace=alpha"]}>
+					<Harness />
+				</MemoryRouter>,
+			);
+			await Promise.resolve();
+		});
+		await act(async () => {
+			navigate("/?workspace=beta");
+			await Promise.resolve();
+		});
+		await act(async () => {
+			navigate("/?workspace=alpha");
+			await Promise.resolve();
+		});
+		expect(pending).toHaveLength(3);
+		pending[2]!(
+			new Response(
+				JSON.stringify({ requests: [{ ...request("alpha", "decision", "new-a"), question: "new alpha" }] }),
+				{ status: 200 },
+			),
+		);
+		await act(async () => {
+			await new Promise((resolve) => setTimeout(resolve, 0));
+		});
+		expect(document.body.textContent).toContain("new alpha");
+		pending[0]!(
+			new Response(
+				JSON.stringify({ requests: [{ ...request("alpha", "decision", "old-a"), question: "old alpha" }] }),
+				{ status: 200 },
+			),
+		);
+		pending[1]!(
+			new Response(JSON.stringify({ requests: [{ ...request("beta", "decision", "b"), question: "old beta" }] }), {
+				status: 200,
+			}),
+		);
+		await act(async () => {
+			await new Promise((resolve) => setTimeout(resolve, 0));
+		});
+		expect(document.body.textContent).toContain("new alpha");
+		expect(document.body.textContent).not.toContain("old alpha");
+		expect(document.body.textContent).not.toContain("old beta");
+	});
+
 	it("permits an explicit writable aggregate target but suppresses blocked approval", async () => {
 		await render(
 			{
@@ -634,9 +742,11 @@ describe("WorkflowInbox", () => {
 
 	it("refreshes after a confirmed save without treating exit success as durable", async () => {
 		let reads = 0;
+		const urls: string[] = [];
 		const pending = request("alpha", "decision");
 		setup({ requests: [pending] });
 		globalThis.fetch = (async (_input: RequestInfo | URL, options?: RequestInit) => {
+			urls.push(String(_input));
 			if (options?.method === "POST")
 				return new Response(JSON.stringify({ ok: true, saved: true, stdout: "saved" }), { status: 200 });
 			reads += 1;
@@ -668,7 +778,59 @@ describe("WorkflowInbox", () => {
 		) as HTMLButtonElement;
 		await act(async () => save.click());
 		expect(reads).toBeGreaterThanOrEqual(2);
+		expect(urls.at(-1)).toContain("refresh=true");
 		expect(document.body.textContent).toContain("Answer saved: yes");
+	});
+
+	it("queues a fresh post-save read behind an in-flight background refresh", async () => {
+		let reads = 0;
+		let releaseBackground!: (response: Response) => void;
+		const urls: string[] = [];
+		const pending = request("alpha", "decision");
+		setup({ requests: [pending] });
+		const intervalCallbacks: Array<() => void> = [];
+		dom!.window.setInterval = ((callback: TimerHandler) => {
+			intervalCallbacks.push(callback as () => void);
+			return 1 as unknown as number;
+		}) as unknown as typeof window.setInterval;
+		globalThis.fetch = (async (_input: RequestInfo | URL, options?: RequestInit) => {
+			urls.push(String(_input));
+			if (options?.method === "POST") return new Response(JSON.stringify({ ok: true, saved: true }), { status: 200 });
+			reads += 1;
+			if (reads === 1) return new Response(JSON.stringify({ requests: [pending] }), { status: 200 });
+			if (reads === 2) return await new Promise<Response>((resolve) => (releaseBackground = resolve));
+			return new Response(JSON.stringify({ requests: [] }), { status: 200 });
+		}) as unknown as typeof fetch;
+		root = createRoot(document.getElementById("root")!);
+		await act(async () => {
+			root?.render(
+				<MemoryRouter initialEntries={["/?workspace=alpha"]}>
+					<WorkflowInbox workspaces={[{ id: "alpha", name: "Alpha", writable: true }]} />
+				</MemoryRouter>,
+			);
+			await new Promise((resolve) => setTimeout(resolve, 0));
+		});
+		const textarea = document.querySelector("textarea") as HTMLTextAreaElement;
+		const checkbox = document.querySelectorAll("input[type=checkbox]").item(0) as HTMLInputElement;
+		await act(async () => {
+			Object.getOwnPropertyDescriptor(dom!.window.HTMLTextAreaElement.prototype, "value")?.set?.call(
+				textarea,
+				"Persist this answer",
+			);
+			textarea.dispatchEvent(new dom!.window.Event("input", { bubbles: true }));
+			checkbox.click();
+		});
+		intervalCallbacks[0]?.();
+		await act(async () => await Promise.resolve());
+		const save = Array.from(document.querySelectorAll("button")).find((button) =>
+			button.textContent?.includes("Save answer"),
+		) as HTMLButtonElement;
+		await act(async () => save.click());
+		expect(reads).toBe(2);
+		releaseBackground(new Response(JSON.stringify({ requests: [pending] }), { status: 200 }));
+		await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+		expect(reads).toBe(3);
+		expect(urls.at(-1)).toContain("refresh=true");
 	});
 
 	it("submits failed human cases with changes and fingerprints their observations", async () => {

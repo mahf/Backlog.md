@@ -198,6 +198,98 @@ describe("workflow completion gate", () => {
 		expect((await core.filesystem.loadTask("task-1"))?.status).toBe("Done");
 	});
 
+	it("accepts one task without being blocked by another unfinished task in its milestone", async () => {
+		const root = await mkdtemp(join(tmpdir(), "backlog-workflow-gate-task-accept-"));
+		roots.push(root);
+		const core = new Core(root);
+		await initializeFilesystemTestProject(core, "Task acceptance fixture");
+		await core.createTask({
+			id: "task-1",
+			title: "Current task",
+			status: "To Do",
+			milestone: "M1",
+			assignee: [],
+			labels: [],
+			dependencies: [],
+			createdDate: "2026-10-26",
+		});
+		await core.createTask({
+			id: "task-2",
+			title: "Unfinished sibling",
+			status: "To Do",
+			milestone: "M1",
+			assignee: [],
+			labels: [],
+			dependencies: [],
+			createdDate: "2026-10-26",
+		});
+		const rqPath = join(root, "rq-task-accept.py");
+		await writeFile(
+			rqPath,
+			"import sys\n" +
+				'if sys.argv[sys.argv.index("--root") + 2:][:2] == ["board", "--plain"]:\n' +
+				' print(\'{"tasks":[{"original_id":"task-1","source_type":"backlog-task"},{"original_id":"task-2","source_type":"backlog-task"}],"requests":[]}\')\n' +
+				'elif sys.argv[-2:] == ["accept", "TASK-1"]:\n' +
+				' print("accepted")\n' +
+				"else:\n" +
+				' print("unexpected accept scope", file=sys.stderr)\n' +
+				" sys.exit(1)\n",
+		);
+		const config = await core.filesystem.loadConfig();
+		if (!config) throw new Error("fixture config missing");
+		config.workflow = { enabled: true, rqPath, pythonPath: process.env.BACKLOG_RQ_PYTHON || "python" };
+		await core.filesystem.saveConfig(config);
+		const task = await core.filesystem.loadTask("task-1");
+		if (!task) throw new Error("fixture task missing");
+		await core.updateTask({ ...task, status: "Done" });
+		expect((await core.filesystem.loadTask("task-1"))?.status).toBe("Done");
+	});
+
+	it("keeps the current task failure blocking even when an unfinished milestone sibling exists", async () => {
+		const root = await mkdtemp(join(tmpdir(), "backlog-workflow-gate-task-accept-failure-"));
+		roots.push(root);
+		const core = new Core(root);
+		await initializeFilesystemTestProject(core, "Task acceptance failure fixture");
+		await core.createTask({
+			id: "task-1",
+			title: "Current task",
+			status: "To Do",
+			milestone: "M1",
+			assignee: [],
+			labels: [],
+			dependencies: [],
+			createdDate: "2026-10-26",
+		});
+		await core.createTask({
+			id: "task-2",
+			title: "Unfinished sibling",
+			status: "To Do",
+			milestone: "M1",
+			assignee: [],
+			labels: [],
+			dependencies: [],
+			createdDate: "2026-10-26",
+		});
+		const rqPath = join(root, "rq-task-accept-failure.py");
+		await writeFile(
+			rqPath,
+			"import sys\n" +
+				'if sys.argv[sys.argv.index("--root") + 2:][:2] == ["board", "--plain"]:\n' +
+				' print(\'{"tasks":[{"original_id":"task-1","source_type":"backlog-task"},{"original_id":"task-2","source_type":"backlog-task"}],"requests":[]}\')\n' +
+				"else:\n" +
+				' print("current task evidence failed", file=sys.stderr)\n' +
+				" sys.exit(1)\n",
+		);
+		const config = await core.filesystem.loadConfig();
+		if (!config) throw new Error("fixture config missing");
+		config.workflow = { enabled: true, rqPath, pythonPath: process.env.BACKLOG_RQ_PYTHON || "python" };
+		await core.filesystem.saveConfig(config);
+		const task = await core.filesystem.loadTask("task-1");
+		if (!task) throw new Error("fixture task missing");
+		await expect(core.updateTask({ ...task, status: "Done" })).rejects.toThrow("current task evidence failed");
+		expect((await core.filesystem.loadTask("task-1"))?.status).toBe("To Do");
+	});
+
 	it("applies the same terminal gate to bulk updates", async () => {
 		const root = await mkdtemp(join(tmpdir(), "backlog-workflow-gate-bulk-"));
 		roots.push(root);

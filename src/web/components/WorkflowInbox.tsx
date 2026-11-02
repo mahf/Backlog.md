@@ -5,6 +5,7 @@ import type { WorkflowManualCase } from "./WorkflowRequestChecks";
 import WorkflowRequestChecks from "./WorkflowRequestChecks";
 
 type RequestWithIdentity = WorkflowRequest & { requestId: string };
+type RefreshMode = "silent" | "initial" | "manual";
 
 const value = (request: WorkflowRequest, ...keys: string[]): string => {
 	for (const key of keys) {
@@ -274,6 +275,7 @@ export default function WorkflowInbox({
 	const aggregate = scope === "all";
 	const [snapshot, setSnapshot] = useState<WorkflowSnapshot | null>(null);
 	const [loadError, setLoadError] = useState<string | null>(null);
+	const [refreshMode, setRefreshMode] = useState<RefreshMode>("initial");
 	const [selectedKey, setSelectedKey] = useState("");
 	const [queuedKeys, setQueuedKeys] = useState<Set<string>>(new Set());
 	const [kindFilter, setKindFilter] = useState("");
@@ -292,8 +294,11 @@ export default function WorkflowInbox({
 	const selectedRevisionRef = useRef<{ key: string; revision: string } | null>(null);
 	const attemptRef = useRef<{ fingerprint: string; key: string } | null>(null);
 	const latestScopeRef = useRef(scope);
+	const scopeEpochRef = useRef({ scope, epoch: 0 });
+	const refreshQueuesRef = useRef(new Map<string, Promise<WorkflowSnapshot | null>>());
 	const selectedKeyRef = useRef(selectedKey);
 	latestScopeRef.current = scope;
+	if (scopeEpochRef.current.scope !== scope) scopeEpochRef.current = { scope, epoch: scopeEpochRef.current.epoch + 1 };
 	selectedKeyRef.current = selectedKey;
 	const writable = useMemo(
 		() =>
@@ -304,9 +309,26 @@ export default function WorkflowInbox({
 	);
 	const refreshWorkflow = useCallback(
 		async (force = false) => {
-			const next = await apiClient.fetchWorkflow(scope === "all" ? "all" : scope || undefined, force);
-			if (latestScopeRef.current === scope) setSnapshot(next);
-			return next;
+			const epoch = scopeEpochRef.current.epoch;
+			const queueKey = `${scope}:${epoch}`;
+			const existing = refreshQueuesRef.current.get(queueKey);
+			if (existing && !force) return existing;
+			const prior = existing ?? Promise.resolve(null as WorkflowSnapshot | null);
+			const queued = prior
+				.catch(() => null)
+				.then(async () => {
+					const next = await apiClient.fetchWorkflow(scope === "all" ? "all" : scope || undefined, force);
+					if (latestScopeRef.current === scope && scopeEpochRef.current.epoch === epoch) {
+						setSnapshot(next);
+						setLoadError(null);
+					}
+					return next;
+				})
+				.finally(() => {
+					if (refreshQueuesRef.current.get(queueKey) === queued) refreshQueuesRef.current.delete(queueKey);
+				});
+			refreshQueuesRef.current.set(queueKey, queued);
+			return queued;
 		},
 		[scope],
 	);
@@ -319,17 +341,26 @@ export default function WorkflowInbox({
 		setMaterial(null);
 		setError(null);
 		setLoadError(null);
-		refreshWorkflow().catch((reason) => {
-			if (active) setLoadError(reason instanceof Error ? reason.message : "Workflow facts unavailable");
-		});
+		setRefreshMode("initial");
+		refreshWorkflow()
+			.catch((reason) => {
+				if (active) setLoadError(reason instanceof Error ? reason.message : "Workflow facts unavailable");
+			})
+			.finally(() => {
+				if (active) setRefreshMode("silent");
+			});
 		return () => {
 			active = false;
 		};
 	}, [refreshWorkflow, scope]);
 
 	useEffect(() => {
+		const epoch = scopeEpochRef.current.epoch;
 		const timer = window.setInterval(() => {
-			void refreshWorkflow().catch(() => undefined);
+			void refreshWorkflow().catch((reason) => {
+				if (latestScopeRef.current === scope && scopeEpochRef.current.epoch === epoch)
+					setLoadError(reason instanceof Error ? reason.message : "Workflow refresh failed");
+			});
 		}, 10000);
 		return () => window.clearInterval(timer);
 	}, [refreshWorkflow, scope]);
@@ -469,7 +500,7 @@ export default function WorkflowInbox({
 				setError("The response command completed, but durable saving was not confirmed. The draft is preserved.");
 				return;
 			}
-			await refreshWorkflow();
+			await refreshWorkflow(true);
 			if (latestScopeRef.current !== scope || selectedKeyRef.current !== key) return;
 			localStorage.removeItem(
 				`backlog.workflow.draft:${workspaceId(selected)}:${taskId(selected)}:${selected.requestId}`,
@@ -503,7 +534,7 @@ export default function WorkflowInbox({
 			const response = await apiClient.resumeWorkflow(selected.requestId, workspaceId(selected));
 			if (latestScopeRef.current !== scope || selectedKeyRef.current !== key) return;
 			setResult(response);
-			await refreshWorkflow();
+			await refreshWorkflow(true);
 		} catch (reason) {
 			if (latestScopeRef.current === scope && selectedKeyRef.current === key)
 				setError(reason instanceof Error ? reason.message : "Resume failed");
@@ -517,7 +548,7 @@ export default function WorkflowInbox({
 			const response = await apiClient.cancelWorkflow(selected.requestId, "Cancelled by human", workspaceId(selected));
 			if (latestScopeRef.current !== scope || selectedKeyRef.current !== key) return;
 			setResult(response);
-			await refreshWorkflow();
+			await refreshWorkflow(true);
 		} catch (reason) {
 			if (latestScopeRef.current === scope && selectedKeyRef.current === key)
 				setError(reason instanceof Error ? reason.message : "Cancel failed");
@@ -555,13 +586,22 @@ export default function WorkflowInbox({
 				<button
 					type="button"
 					className="rounded border px-3 py-2 text-sm"
+					disabled={refreshMode === "manual" || refreshMode === "initial"}
+					aria-busy={refreshMode === "manual" || refreshMode === "initial"}
 					onClick={() => {
-						void refreshWorkflow(true).catch((reason) =>
-							setLoadError(reason instanceof Error ? reason.message : "Workflow facts unavailable"),
-						);
+						const epoch = scopeEpochRef.current.epoch;
+						setRefreshMode("manual");
+						void refreshWorkflow(true)
+							.catch((reason) => {
+								if (latestScopeRef.current === scope && scopeEpochRef.current.epoch === epoch)
+									setLoadError(reason instanceof Error ? reason.message : "Workflow facts unavailable");
+							})
+							.finally(() => {
+								if (latestScopeRef.current === scope && scopeEpochRef.current.epoch === epoch) setRefreshMode("silent");
+							});
 					}}
 				>
-					Refresh
+					{refreshMode === "manual" ? "Refreshing..." : "Refresh"}
 				</button>
 			</div>
 			<div className="flex flex-wrap gap-2" role="toolbar" aria-label="Human inbox filters">
@@ -608,6 +648,7 @@ export default function WorkflowInbox({
 					{loadError}
 				</div>
 			)}
+			{refreshMode === "initial" && !snapshot && <div role="status">Loading workflow...</div>}
 			{result && !selected && (
 				<div role="status" className="rounded border border-green-300 bg-green-50 p-3 text-sm">
 					Answer saved: {result.saved === true ? "yes" : result.saved === false ? "no" : "unknown"}; transport:{" "}
