@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { $ } from "bun";
@@ -84,7 +84,7 @@ describe("workflow gate public entrypoints", () => {
 		}
 	});
 
-	it("blocks CLI terminal edits with invalid evidence and keeps material unchanged", async () => {
+	it("warns but does not block CLI terminal edits when rq accept fails", async () => {
 		const { root, core } = await fixture();
 		const rqPath = join(root, "rq-fixture.py");
 		await writeFile(
@@ -92,17 +92,13 @@ describe("workflow gate public entrypoints", () => {
 			`import json, sys\nif "board" in sys.argv:\n print(json.dumps({"tasks":[{"original_id":"task-1","source_type":"backlog-task"}],"requests":[]}))\nelse:\n print("invalid approval", file=sys.stderr)\n sys.exit(1)\n`,
 			"utf8",
 		);
-		const before = await readFile((await core.filesystem.loadTask("task-1"))?.filePath ?? "", "utf8");
-		const cli =
-			await $`bun ${join(import.meta.dir, "..", "cli.ts")} task edit task-1 --status Done --description changed --plain`
-				.cwd(root)
-				.nothrow()
-				.quiet();
-		expect(cli.exitCode).not.toBe(0);
-		expect(`${cli.stdout}${cli.stderr}`).toContain("Workflow gate rejected");
-		expect((await core.filesystem.loadTask("task-1"))?.status).toBe("To Do");
-		const after = await readFile((await core.filesystem.loadTask("task-1"))?.filePath ?? "", "utf8");
-		expect(after).toBe(before);
+		const cli = await $`bun ${join(import.meta.dir, "..", "cli.ts")} task edit task-1 --status Done --plain`
+			.cwd(root)
+			.nothrow()
+			.quiet();
+		expect(cli.exitCode).toBe(0);
+		expect(cli.stderr.toString()).toContain("Workflow acceptance warning");
+		expect((await core.filesystem.loadTask("task-1"))?.status).toBe("Done");
 	});
 
 	it("protects both demotion paths and direct draft promotion", async () => {

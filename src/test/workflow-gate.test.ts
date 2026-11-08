@@ -335,7 +335,7 @@ describe("workflow completion gate", () => {
 		expect((await core.filesystem.loadTask("task-2"))?.status).toBe("Done");
 	});
 
-	it("surfaces a stale public approval and leaves the task unchanged", async () => {
+	it("warns about a stale public approval without blocking", async () => {
 		const root = await mkdtemp(join(tmpdir(), "backlog-workflow-gate-stale-"));
 		roots.push(root);
 		const core = new Core(root);
@@ -360,8 +360,8 @@ describe("workflow completion gate", () => {
 		await core.filesystem.saveConfig(config);
 		const task = await core.filesystem.loadTask("task-1");
 		if (!task) throw new Error("fixture task missing");
-		await expect(core.updateTask({ ...task, status: "Done" })).rejects.toThrow("stale approval");
-		expect((await core.filesystem.loadTask("task-1"))?.status).toBe("To Do");
+		await core.updateTask({ ...task, status: "Done" });
+		expect((await core.filesystem.loadTask("task-1"))?.status).toBe("Done");
 	});
 
 	it("keeps ordinary disabled projects unchanged", async () => {

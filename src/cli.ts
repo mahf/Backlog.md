@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { readFile } from "node:fs/promises";
-import { dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { stdin as input } from "node:process";
 import { createInterface } from "node:readline/promises";
 import * as clack from "@clack/prompts";
@@ -4722,10 +4722,14 @@ async function handleBoardView(options: {
 	const workspace = options.workspace ?? inherited.workspace;
 	const entries = await listQueryWorkspaces();
 	// Interactive board aggregates every registered workspace unless one is chosen explicitly.
-	const allWorkspaces =
-		options.allWorkspaces ??
-		inherited.allWorkspaces ??
-		(!workspace && !options.json && !options.plain && entries.some((entry) => !entry.error));
+	const implicitAggregate =
+		options.allWorkspaces === undefined &&
+		inherited.allWorkspaces === undefined &&
+		!workspace &&
+		!options.json &&
+		!options.plain &&
+		entries.some((entry) => !entry.error);
+	const allWorkspaces = options.allWorkspaces ?? inherited.allWorkspaces ?? implicitAggregate;
 	const currentRoot = workspace || allWorkspaces ? process.cwd() : await requireProjectRoot();
 	const selected = workspace ? entries.find((entry) => entry.id === workspace) : undefined;
 	if (workspace && !selected) throw new Error(`Workspace not found: ${workspace}`);
@@ -4734,6 +4738,13 @@ async function handleBoardView(options: {
 	const roots = allWorkspaces
 		? entries.filter((entry) => !entry.error)
 		: [selected ?? currentEntry ?? { id: "current", name: "Current project", rootPath: currentRoot, writable: true }];
+	if (implicitAggregate) {
+		// Keep the project the board was launched from, even when it is not registered.
+		const launchRoot = await findBacklogRoot(process.cwd()).catch(() => null);
+		if (launchRoot && !roots.some((entry) => entry.rootPath.toLowerCase() === launchRoot.toLowerCase())) {
+			roots.unshift({ id: "current", name: basename(launchRoot), rootPath: launchRoot, writable: true });
+		}
+	}
 	if (allWorkspaces && roots.length === 0) throw new Error("No registered directory workspaces are available.");
 	const loaded = await Promise.all(
 		roots.map(async (entry) => {

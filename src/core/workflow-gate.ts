@@ -112,8 +112,17 @@ export async function assertWorkflowTerminalTransition(
 		pythonPath: config.workflow.pythonPath,
 	});
 	if (result.exitCode !== 0) {
+		// Advisory only: `rq accept` judges the whole project/milestone, so keep just this task's
+		// findings and warn instead of blocking; the status change still goes through.
 		const detail = (result.stderr || result.stdout || `rq accept exited with code ${result.exitCode}`).trim();
-		throw new Error(`Workflow gate rejected task ${next.id}: ${detail}`);
+		const idPattern = new RegExp(`(?<![\\w-])${next.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-]|\\.\\d)`, "i");
+		const lines = detail.split(/\r?\n/);
+		const own = lines.filter((line) => idPattern.test(line));
+		// Output with no per-task findings at all (e.g. rq crashed) cannot be attributed; show it whole.
+		const shown = own.length > 0 ? own : lines.some((line) => line.includes("✗")) ? [] : lines;
+		if (shown.length > 0) {
+			console.warn(`Workflow acceptance warning for task ${next.id} (not blocking):\n${shown.join("\n")}`);
+		}
 	}
 }
 
