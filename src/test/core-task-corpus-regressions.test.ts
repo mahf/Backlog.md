@@ -167,6 +167,41 @@ describe("Core shared task corpus regressions", () => {
 		expect(dependency?.completed).toBe(true);
 	});
 
+	it("loads detail relationships from one refreshed local and archived snapshot", async () => {
+		const activeTaskPath = await core.filesystem.saveTask({ ...task("TASK-2", "Root task"), dependencies: ["TASK-1"] });
+		await writeTask(core.filesystem.archiveTasksDir, "task-1 - Completed.md", task("TASK-1", "Completed", "Done"));
+		await core.queryTasks();
+		await Bun.write(
+			activeTaskPath,
+			serializeTask({ ...task("TASK-2", "Externally updated root"), dependencies: ["TASK-1"] }),
+		);
+
+		const originalListTasks = core.filesystem.listTasks.bind(core.filesystem);
+		const originalListArchivedTasks = core.filesystem.listArchivedTasks.bind(core.filesystem);
+		let activeScans = 0;
+		let archivedScans = 0;
+		core.filesystem.listTasks = async (...args) => {
+			activeScans += 1;
+			return await originalListTasks(...args);
+		};
+		core.filesystem.listArchivedTasks = async (...args) => {
+			archivedScans += 1;
+			return await originalListArchivedTasks(...args);
+		};
+		try {
+			const corpus = await loadTaskCorpus(core, { includeCrossBranch: true });
+			const root = corpus.tasks.find((candidate) => candidate.id === "TASK-2");
+			const dependency = buildDependencyGraph(root as Task, corpus).nodes.find((node) => node.id === "TASK-1");
+
+			expect([activeScans, archivedScans]).toEqual([1, 1]);
+			expect(root?.title).toBe("Externally updated root");
+			expect(dependency?.completed).toBe(true);
+		} finally {
+			core.filesystem.listTasks = originalListTasks;
+			core.filesystem.listArchivedTasks = originalListArchivedTasks;
+		}
+	});
+
 	it("keeps a branch completed file claiming a local completed ID ambiguous", async () => {
 		await writeTask(core.filesystem.tasksDir, "task-2 - Root.md", {
 			...task("TASK-2", "Root task"),
@@ -234,9 +269,9 @@ describe("Core shared task corpus regressions", () => {
 			listRecentBranches: git.listRecentBranches.bind(git),
 			listRecentRemoteBranches: git.listRecentRemoteBranches.bind(git),
 			resolveCommit: git.resolveCommit.bind(git),
-			listFilesInTree: git.listFilesInTree.bind(git),
+			listFilesWithObjectIdsInTree: git.listFilesWithObjectIdsInTree.bind(git),
 			getBranchLastModifiedMap: git.getBranchLastModifiedMap.bind(git),
-			showFile: git.showFile.bind(git),
+			showBlobs: git.showBlobs.bind(git),
 		};
 		const counts = {
 			fetch: 0,
@@ -268,17 +303,17 @@ describe("Core shared task corpus regressions", () => {
 			counts.resolveCommit += 1;
 			return await originals.resolveCommit(...args);
 		};
-		git.listFilesInTree = async (...args) => {
+		git.listFilesWithObjectIdsInTree = async (...args) => {
 			counts.trees += 1;
-			return await originals.listFilesInTree(...args);
+			return await originals.listFilesWithObjectIdsInTree(...args);
 		};
 		git.getBranchLastModifiedMap = async (...args) => {
 			counts.histories += 1;
 			return await originals.getBranchLastModifiedMap(...args);
 		};
-		git.showFile = async (ref, path) => {
-			counts.blobs.push(path);
-			return await originals.showFile(ref, path);
+		git.showBlobs = async (objectIds) => {
+			counts.blobs.push(...objectIds);
+			return await originals.showBlobs(objectIds);
 		};
 
 		try {
@@ -290,9 +325,9 @@ describe("Core shared task corpus regressions", () => {
 			git.listRecentBranches = originals.listRecentBranches;
 			git.listRecentRemoteBranches = originals.listRecentRemoteBranches;
 			git.resolveCommit = originals.resolveCommit;
-			git.listFilesInTree = originals.listFilesInTree;
+			git.listFilesWithObjectIdsInTree = originals.listFilesWithObjectIdsInTree;
 			git.getBranchLastModifiedMap = originals.getBranchLastModifiedMap;
-			git.showFile = originals.showFile;
+			git.showBlobs = originals.showBlobs;
 		}
 
 		expect(counts).toEqual({

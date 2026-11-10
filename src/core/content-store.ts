@@ -1855,7 +1855,7 @@ export class ContentStore {
 	}
 
 	private hasTaskCollectionChanged(nextTasks: Task[]): boolean {
-		return this.hasTaskListChanged(this.cachedTasks, nextTasks);
+		return this.hasTaskListChanged(this.cachedTasks, [...new Map(nextTasks.map((task) => [task.id, task])).values()]);
 	}
 
 	private hasTaskListChanged(currentTasks: Task[], nextTasks: Task[]): boolean {

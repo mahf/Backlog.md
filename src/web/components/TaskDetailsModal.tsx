@@ -217,6 +217,23 @@ export const TaskDetailsModal: React.FC<Props> = ({
 	onWorkspaceTargetChange,
 }) => {
 	const { theme } = useTheme();
+	const sectionsRef = useRef<HTMLDivElement | null>(null);
+	const [outlineVisible, setOutlineVisible] = useState(true);
+	const [activeSection, setActiveSection] = useState("description");
+	const scrollToSection = (id: string) => {
+		const container = sectionsRef.current;
+		const section = container?.querySelector<HTMLElement>(`[data-task-section="${id}"]`);
+		if (container && section) {
+			if (container.scrollHeight > container.clientHeight) {
+				container.scrollTo({
+					top: section.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop,
+					behavior: "auto",
+				});
+			} else {
+				section.scrollIntoView({ behavior: "auto", block: "start" });
+			}
+		}
+	};
 	const isCreateMode = !task;
 	const workflowWorkspaceId =
 		task && typeof (task as Task & { workspaceId?: unknown }).workspaceId === "string"
@@ -1159,6 +1176,37 @@ export const TaskDetailsModal: React.FC<Props> = ({
 
 	const displayId = task?.id ?? "";
 	const documentation = task?.documentation ?? [];
+	const outline = [
+		...(isCreateMode ? [{ id: "title", label: "Title" }] : []),
+		{ id: "description", label: "Description" },
+		...(subtasks.length > 0 ? [{ id: "subtasks", label: "Subtasks" }] : []),
+		{ id: "references", label: "References" },
+		{ id: "modified-files", label: "Modified files" },
+		...(documentation.length > 0 ? [{ id: "documentation", label: "Documentation" }] : []),
+		{ id: "acceptance-criteria", label: "Acceptance Criteria" },
+		{ id: "definition-of-done", label: "Definition of Done" },
+		...(dependencyGraph && dependencyGraph.nodes.length > 1 ? [{ id: "dependency-graph", label: "Dependency Graph" }] : []),
+		{ id: "implementation-plan", label: "Implementation Plan" },
+		{ id: "implementation-notes", label: "Implementation Notes" },
+		...(!isCreateMode ? [{ id: "comments", label: "Comments" }] : []),
+		...(mode !== "preview" || finalSummary.trim().length > 0 ? [{ id: "final-summary", label: "Final Summary" }] : []),
+	];
+	const firstOutlineId = outline[0]?.id ?? "description";
+	const selectedSection = outline.some(({ id }) => id === activeSection) ? activeSection : firstOutlineId;
+
+	useEffect(() => {
+		if (isOpen) setActiveSection(firstOutlineId);
+	}, [isOpen, task?.id, firstOutlineId]);
+
+	const updateActiveSection = () => {
+		const container = sectionsRef.current;
+		if (!container) return;
+		const top = container.getBoundingClientRect().top + 24;
+		const sections = Array.from(container.querySelectorAll<HTMLElement>("[data-task-section]"));
+		const current = sections.filter((section) => section.getBoundingClientRect().top <= top).at(-1) ?? sections[0];
+		const id = current?.dataset.taskSection;
+		if (id && id !== activeSection) setActiveSection(id);
+	};
 
 	return (
 		<Modal
@@ -1173,7 +1221,8 @@ export const TaskDetailsModal: React.FC<Props> = ({
 				onClose();
 			}}
 			title={isCreateMode ? (isDraftMode ? "Create New Draft" : "Create New Task") : `${displayId} — ${task.title}`}
-			maxWidthClass="max-w-5xl"
+			maxWidthClass="max-w-[1600px]"
+			internalScroll
 			disableEscapeClose={mode === "edit" || mode === "create" || demoting}
 			actions={
 				<div className="flex flex-nowrap items-center justify-end gap-2">
@@ -1305,12 +1354,65 @@ export const TaskDetailsModal: React.FC<Props> = ({
 					</nav>
 				)}
 
-				<div className="grid grid-cols-1 md:grid-cols-3 gap-6" onClickCapture={confirmNavigationAwayFromEdits}>
+				<div
+					className={`relative grid min-h-0 grid-cols-1 gap-6 lg:flex-1 lg:grid-rows-[minmax(0,1fr)] lg:overflow-visible ${outlineVisible ? "lg:grid-cols-[11rem_minmax(0,1fr)_18rem]" : "lg:grid-cols-[minmax(0,1fr)_18rem]"}`}
+					onClickCapture={confirmNavigationAwayFromEdits}
+				>
+					<nav
+						aria-label="Task sections"
+						className={`order-first min-h-0 ${outlineVisible ? "border-r border-gray-200 dark:border-gray-700 lg:h-full lg:overflow-y-auto lg:overscroll-contain lg:pr-3" : "border-r-0 flex justify-center lg:absolute lg:left-0 lg:top-0 lg:z-10 lg:h-auto lg:w-10 lg:overflow-visible"}`}
+					>
+						<div className={`flex items-center ${outlineVisible ? "mb-2 justify-between" : "justify-center"}`}>
+							{outlineVisible && (
+								<h2 className="text-xs font-semibold uppercase text-gray-500 dark:text-gray-400">Outline</h2>
+							)}
+							<button
+								type="button"
+								data-outline-toggle
+								onClick={() => setOutlineVisible((visible) => !visible)}
+								aria-label={outlineVisible ? "Hide task outline" : "Show task outline"}
+								title={outlineVisible ? "Hide task outline" : "Show task outline"}
+								aria-expanded={outlineVisible}
+								aria-controls="task-outline-content"
+								className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded border border-transparent text-gray-600 hover:border-gray-300 hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-gray-300 dark:hover:border-gray-600 dark:hover:bg-gray-700"
+							>
+								<svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
+									<rect x="3" y="4" width="18" height="16" rx="1" strokeWidth="2" />
+									<path
+										d={outlineVisible ? "M9 4v16M12 8h6M12 12h6M12 16h6" : "M15 4v16M12 8H6M12 12H6M12 16H6"}
+										strokeWidth="2"
+									/>
+								</svg>
+							</button>
+						</div>
+						<div id="task-outline-content">
+							{outlineVisible && (
+								<ul className="space-y-1">
+									{outline.map(({ id, label }) => (
+										<li key={id}>
+											<button
+												type="button"
+												data-section={id}
+												aria-current={id === selectedSection ? "location" : undefined}
+												onClick={() => {
+													setActiveSection(id);
+													scrollToSection(id);
+												}}
+												className={`w-full rounded border-l-2 px-2 py-1.5 text-left text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${id === selectedSection ? "border-blue-600 bg-blue-50 font-semibold text-blue-800 dark:border-blue-400 dark:bg-blue-900/30 dark:text-blue-200" : "border-transparent text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"}`}
+											>
+												{label}
+											</button>
+										</li>
+									))}
+								</ul>
+							)}
+						</div>
+					</nav>
 					{/* Main content */}
-					<div className="md:col-span-2 space-y-6">
+					<div className="min-h-0 min-w-0 space-y-6 lg:overflow-y-auto lg:overscroll-contain" ref={sectionsRef} onScroll={updateActiveSection}>
 						{/* Title field for create mode */}
 						{isCreateMode && (
-							<div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
+							<div data-task-section="title" className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
 								{workspaceOptions.length > 0 && (
 									<div className="mb-4">
 										<SectionHeader title="Directory project" />
@@ -1346,7 +1448,7 @@ export const TaskDetailsModal: React.FC<Props> = ({
 							</div>
 						)}
 						{/* Description */}
-						<div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
+						<div data-task-section="description" className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
 							<SectionHeader title="Description" />
 							{mode === "preview" ? (
 								description ? (
@@ -1370,7 +1472,7 @@ export const TaskDetailsModal: React.FC<Props> = ({
 						</div>
 
 						{subtasks.length > 0 && (
-							<section className="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
+							<section data-task-section="subtasks" className="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
 								<SectionHeader
 									title="Subtasks"
 									right={
@@ -1419,7 +1521,7 @@ export const TaskDetailsModal: React.FC<Props> = ({
 						)}
 
 						{/* References */}
-						<div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
+						<div data-task-section="references" className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
 							<SectionHeader title="References" />
 							<div className="space-y-3">
 								{references.length > 0 ? (
@@ -1498,7 +1600,7 @@ export const TaskDetailsModal: React.FC<Props> = ({
 						</div>
 
 						{/* Modified files */}
-						<div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
+						<div data-task-section="modified-files" className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
 							<SectionHeader title={`Modified files${modifiedFiles.length ? ` (${modifiedFiles.length})` : ""}`} />
 							<div className="space-y-3">
 								{modifiedFiles.length > 0 ? (
@@ -1569,7 +1671,7 @@ export const TaskDetailsModal: React.FC<Props> = ({
 
 						{/* Documentation */}
 						{documentation.length > 0 && (
-							<div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
+							<div data-task-section="documentation" className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
 								<SectionHeader title="Documentation" />
 								<div className="space-y-2">
 									<ul className="space-y-2">
@@ -1599,7 +1701,7 @@ export const TaskDetailsModal: React.FC<Props> = ({
 						)}
 
 						{/* Acceptance Criteria */}
-						<div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
+						<div data-task-section="acceptance-criteria" className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
 							<SectionHeader
 								title={`Acceptance Criteria ${totalCount ? `(${checkedCount}/${totalCount})` : ""}`}
 								right={mode === "preview" && !isReadOnly ? <span>Toggle to update</span> : null}
@@ -1631,7 +1733,7 @@ export const TaskDetailsModal: React.FC<Props> = ({
 						</div>
 
 						{/* Definition of Done */}
-						<div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
+						<div data-task-section="definition-of-done" className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
 							<SectionHeader
 								title={`Definition of Done ${definitionTotalCount ? `(${definitionCheckedCount}/${definitionTotalCount})` : ""}`}
 								right={mode === "preview" && !isReadOnly ? <span>Toggle to update</span> : null}
@@ -1666,14 +1768,17 @@ export const TaskDetailsModal: React.FC<Props> = ({
 						</div>
 
 						{dependencyGraph && dependencyGraph.nodes.length > 1 && (
-							<section className="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
+							<section
+								data-task-section="dependency-graph"
+								className="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800"
+							>
 								<SectionHeader title="Dependency Graph" />
 								<DependencyGraphSection graph={dependencyGraph} />
 							</section>
 						)}
 
 						{/* Implementation Plan */}
-						<div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
+						<div data-task-section="implementation-plan" className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
 							<SectionHeader title="Implementation Plan" />
 							{mode === "preview" ? (
 								plan ? (
@@ -1697,7 +1802,7 @@ export const TaskDetailsModal: React.FC<Props> = ({
 						</div>
 
 						{/* Implementation Notes */}
-						<div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
+						<div data-task-section="implementation-notes" className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
 							<SectionHeader title="Implementation Notes" />
 							{mode === "preview" ? (
 								notes ? (
@@ -1722,7 +1827,7 @@ export const TaskDetailsModal: React.FC<Props> = ({
 
 						{/* Comments */}
 						{!isCreateMode && (
-							<div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
+							<div data-task-section="comments" className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
 								<SectionHeader title={`Comments${comments.length ? ` (${comments.length})` : ""}`} />
 								{comments.length > 0 ? (
 									<div className="space-y-4">
@@ -1780,7 +1885,7 @@ export const TaskDetailsModal: React.FC<Props> = ({
 
 						{/* Final Summary */}
 						{(mode !== "preview" || finalSummary.trim().length > 0) && (
-							<div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
+							<div data-task-section="final-summary" className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
 								<SectionHeader title="Final Summary" right="Completion summary" />
 								{mode === "preview" ? (
 									<div className="prose prose-sm !max-w-none wmde-markdown" data-color-mode={theme}>
@@ -1805,7 +1910,7 @@ export const TaskDetailsModal: React.FC<Props> = ({
 					</div>
 
 					{/* Sidebar */}
-					<div className="md:col-span-1 space-y-4">
+					<div className="min-h-0 min-w-0 space-y-4 lg:h-full lg:overflow-y-auto lg:overscroll-contain">
 						{/* Dates */}
 						{task && (
 							<div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3 text-xs text-gray-600 dark:text-gray-300 space-y-1">

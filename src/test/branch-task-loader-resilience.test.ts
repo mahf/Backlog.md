@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { BranchTaskLoader } from "../core/task-loader.ts";
 import type { GitOperations } from "../git/operations.ts";
 import type { BacklogConfig } from "../types/index.ts";
+import { installBatchTaskGitFixture } from "./branch-task-loader-fixtures.ts";
 
 const config: BacklogConfig = {
 	projectName: "Branch loader resilience",
@@ -23,20 +24,20 @@ describe("BranchTaskLoader resilience", () => {
 		const taskPath = "backlog/tasks/task-17 - Healthy task.md";
 		const treeCalls = new Set<string>();
 		const git = {
-			listFilesInTree: async (commit: string) => {
+			listFilesWithObjectIdsInTree: async (commit: string) => {
 				treeCalls.add(commit);
 				if (commit === badCommit) throw new Error("branch tree is unavailable");
-				if (commit === goodCommit) return [taskPath];
+				if (commit === goodCommit) return [{ path: taskPath, objectId: goodCommit }];
 				throw new Error(`unexpected commit ${commit}`);
 			},
 			getBranchLastModifiedMap: async (commit: string) => {
 				expect(commit).toBe(goodCommit);
 				return new Map([[taskPath, new Date("2026-08-10T00:00:00Z")]]);
 			},
-			showFile: async (commit: string, path: string) => {
-				expect(commit).toBe(goodCommit);
-				expect(path).toBe(taskPath);
-				return `---
+			showBlobs: async (objectIds: string[]) => {
+				expect(objectIds).toEqual([goodCommit]);
+				return [
+					`---
 id: TASK-17
 title: Healthy task
 status: To Do
@@ -48,7 +49,8 @@ dependencies: []
 
 ## Description
 
-Loaded despite the neighboring branch failure.`;
+Loaded despite the neighboring branch failure.`,
+				];
 			},
 		} as unknown as GitOperations;
 
@@ -118,7 +120,7 @@ dependencies: []
 Loaded after retrying the failed history query.`;
 			},
 		} as unknown as GitOperations;
-		const loader = new BranchTaskLoader(git);
+		const loader = new BranchTaskLoader(installBatchTaskGitFixture(git));
 		const tips = [
 			{ name: "main", commit: currentCommit, current: true },
 			{ name: "origin/feature/retry", commit: featureCommit, current: false },
@@ -174,7 +176,7 @@ dependencies: []
 Loaded after retrying the failed blob read.`;
 			},
 		} as unknown as GitOperations;
-		const loader = new BranchTaskLoader(git);
+		const loader = new BranchTaskLoader(installBatchTaskGitFixture(git));
 		const tips = [
 			{ name: "main", commit: currentCommit, current: true },
 			{ name: "feature/retry", commit: featureCommit, current: false },
@@ -192,6 +194,69 @@ Loaded after retrying the failed blob read.`;
 			historyCalls: 1,
 			blobCalls: 2,
 		});
+	});
+
+	it("keeps healthy blobs when one winner is missing and retries only the missing blob", async () => {
+		const currentCommit = "0".repeat(40);
+		const featureCommit = "5".repeat(40);
+		const healthyPath = "backlog/tasks/task-21 - Healthy.md";
+		const missingPath = "backlog/tasks/task-22 - Missing.md";
+		const healthyObjectId = "a".repeat(40);
+		const missingObjectId = "b".repeat(40);
+		const batchCalls: string[][] = [];
+		const git = {
+			listFilesWithObjectIdsInTree: async () => [
+				{ path: healthyPath, objectId: healthyObjectId },
+				{ path: missingPath, objectId: missingObjectId },
+			],
+			getBranchLastModifiedMap: async () =>
+				new Map([
+					[healthyPath, new Date("2026-08-10T00:00:00Z")],
+					[missingPath, new Date("2026-08-10T00:00:00Z")],
+				]),
+			showBlobs: async (objectIds: string[]) => {
+				batchCalls.push(objectIds);
+				if (batchCalls.length === 1) {
+					return [
+						`---
+id: TASK-21
+title: Healthy task
+status: To Do
+assignee: []
+created_date: 2026-08-10
+labels: []
+dependencies: []
+---`,
+						null,
+					];
+				}
+				return [
+					`---
+id: TASK-22
+title: Recovered task
+status: To Do
+assignee: []
+created_date: 2026-08-10
+labels: []
+dependencies: []
+---`,
+				];
+			},
+		} as unknown as GitOperations;
+		const loader = new BranchTaskLoader(git);
+		const tips = [
+			{ name: "main", commit: currentCommit, current: true },
+			{ name: "feature/recovery", commit: featureCommit, current: false },
+		];
+
+		const first = await loader.load(tips, config, [], false);
+		expect(first.complete).toBe(false);
+		expect(first.entries.map((entry) => entry.task?.title)).toEqual(["Healthy task", undefined]);
+
+		const second = await loader.load(tips, config, [], false);
+		expect(second.complete).toBe(true);
+		expect(second.entries.map((entry) => entry.task?.title)).toEqual(["Healthy task", "Recovered task"]);
+		expect(batchCalls).toEqual([[healthyObjectId, missingObjectId], [missingObjectId]]);
 	});
 
 	it("caches an immutable malformed task without leaving the generation unhealthy", async () => {
@@ -215,7 +280,7 @@ Loaded after retrying the failed blob read.`;
 				return "---\nid: [unterminated\n---";
 			},
 		} as unknown as GitOperations;
-		const loader = new BranchTaskLoader(git);
+		const loader = new BranchTaskLoader(installBatchTaskGitFixture(git));
 		const tips = [
 			{ name: "main", commit: currentCommit, current: true },
 			{ name: "feature/malformed", commit: featureCommit, current: false },

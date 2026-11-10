@@ -263,9 +263,15 @@ export class ApiClient {
 	}
 
 	// Enhanced fetch with retry logic and better error handling
-	private async fetchWithRetry(url: string, options: RequestInit = {}, retriesOverride?: number): Promise<Response> {
-		const { retries: configuredRetries = 3, timeout = 10000 } = this.config;
+	private async fetchWithRetry(
+		url: string,
+		options: RequestInit = {},
+		retriesOverride?: number,
+		timeoutOverride?: number,
+	): Promise<Response> {
+		const { retries: configuredRetries = 3, timeout: configuredTimeout = 10000 } = this.config;
 		const retries = retriesOverride ?? configuredRetries;
+		const timeout = timeoutOverride ?? configuredTimeout;
 		let lastError: Error | undefined;
 
 		for (let attempt = 0; attempt <= retries; attempt++) {
@@ -275,16 +281,19 @@ export class ApiClient {
 				const timeoutId = setTimeout(() => controller.abort(), timeout);
 
 				const requestUrl = typeof window === "undefined" ? url : this.withWorkspaceScope(url, options);
-				const response = await fetch(requestUrl, {
-					...options,
-					signal: controller.signal,
-					headers: {
-						"Content-Type": "application/json",
-						...options.headers,
-					},
-				});
-
-				clearTimeout(timeoutId);
+				let response: Response;
+				try {
+					response = await fetch(requestUrl, {
+						...options,
+						signal: controller.signal,
+						headers: {
+							"Content-Type": "application/json",
+							...options.headers,
+						},
+					});
+				} finally {
+					clearTimeout(timeoutId);
+				}
 
 				if (!response.ok) {
 					let errorData: unknown = null;
@@ -455,7 +464,8 @@ export class ApiClient {
 	/** Reads one task through the detail path, so the response already carries its dependency graph. */
 	async fetchTask(id: string, workspaceId?: string): Promise<TaskDetail> {
 		const target = workspaceId ? `?workspace=${encodeURIComponent(workspaceId)}` : "";
-		return this.fetchJson<TaskDetail>(`${API_BASE}/task/${encodeURIComponent(id)}${target}`);
+		const response = await this.fetchWithRetry(`${API_BASE}/task/${encodeURIComponent(id)}${target}`, {}, 0, 60000);
+		return response.json();
 	}
 
 	async createTask(task: Omit<Task, "id" | "createdDate">, workspaceId?: string): Promise<Task> {

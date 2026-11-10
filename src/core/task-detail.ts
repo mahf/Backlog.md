@@ -33,24 +33,29 @@ export async function loadTaskCorpus(
 	core: Core,
 	options: { includeCrossBranch: boolean } = { includeCrossBranch: false },
 ): Promise<TaskCorpus> {
-	const [workingCopyTasks, archivedTasks, config] = await Promise.all([
-		core.queryTasks({ includeCrossBranch: false }),
-		core.filesystem.listArchivedTasks(),
-		core.filesystem.loadConfig(),
-	]);
-	const statuses = config?.statuses;
-
 	if (!options.includeCrossBranch) {
-		return { tasks: workingCopyTasks, archivedTasks, statuses };
+		const [workingCopyTasks, archivedTasks, config] = await Promise.all([
+			core.queryTasks({ includeCrossBranch: false }),
+			core.filesystem.listArchivedTasks(),
+			core.filesystem.loadConfig(),
+		]);
+		return { tasks: workingCopyTasks, archivedTasks, statuses: config?.statuses };
 	}
 
-	const storeTasks = await core.queryTasks({ includeCrossBranch: true });
+	await core.refreshTasksForTaskRead();
+	const {
+		tasks: storeTasks,
+		activeTasks: workingCopyTasks,
+		archivedTasks,
+		config,
+		identityIndex,
+	} = (await core.getContentStore()).getTaskCorpusSnapshot();
+	const statuses = config?.statuses;
 	const workingCopyIds = new Set(workingCopyTasks.map((task) => canonicalTaskId(task.id)));
 
 	// The cross-branch store's task list excludes archived records, so an identity that only exists
 	// as an archived record on some branch would otherwise read as missing here. Its identity index
 	// still knows those records; add the ones the local archived corpus does not already cover.
-	const identityIndex = (await core.getContentStore()).getTaskCorpusSnapshot().identityIndex;
 	const localArchivedIds = new Set(archivedTasks.map((task) => canonicalTaskId(task.id)));
 	const crossBranchArchived = (identityIndex?.getTasks(true) ?? []).filter(
 		(task) => task.source === "archived" && !localArchivedIds.has(canonicalTaskId(task.id)),

@@ -8,7 +8,7 @@ import type { ContentStore } from "../core/content-store.ts";
 import { initializeProject } from "../core/init.ts";
 import type { SearchService } from "../core/search-service.ts";
 import { getTaskStatistics } from "../core/statistics.ts";
-import { loadTaskDetail } from "../core/task-detail.ts";
+import { loadTaskCorpus, toTaskDetail } from "../core/task-detail.ts";
 import { runWorkflow, type WorkflowCommandResult, type WorkflowOptions } from "../core/workflow-adapter.ts";
 import { listWorkspaces } from "../core/workspace-registry.ts";
 import { isCreateLockError, isTaskLockError } from "../file-system/operations.ts";
@@ -522,6 +522,7 @@ export class BacklogServer {
 		try {
 			const serveOptions = {
 				port: finalPort,
+				idleTimeout: 60,
 				hostname: BROWSER_HOST,
 				development: process.env.NODE_ENV === "development",
 				routes: {
@@ -1300,7 +1301,7 @@ export class BacklogServer {
 		}
 		let resolvedTask: Task | null;
 		try {
-			resolvedTask = await this.core.getTask(taskId);
+			resolvedTask = await this.core.getTask(taskId, { refreshCrossBranch: false });
 		} catch (error) {
 			if (!isAmbiguousTaskIdError(error)) throw error;
 			const message = error.candidates.some((candidate) => !isAbsolute(candidate))
@@ -1316,10 +1317,12 @@ export class BacklogServer {
 	 * so the browser gets the dependency graph in the same response that opens the task.
 	 */
 	private async handleGetTask(taskId: string, requestedWorkspaceId?: string): Promise<Response> {
+		if (!isValidTaskId(taskId)) return Response.json({ error: `Invalid task ID: ${taskId}` }, { status: 400 });
+		await this.ensureServicesReady();
+		const corpus = await loadTaskCorpus(this.core, { includeCrossBranch: true });
 		const resolved = await this.resolveDetailTask(taskId);
 		if (resolved instanceof Response) return resolved;
-		await this.ensureServicesReady();
-		const detail = await loadTaskDetail(this.core, resolved, { includeCrossBranch: true });
+		const detail = toTaskDetail(resolved, corpus);
 		const workspaceId =
 			requestedWorkspaceId ??
 			this.parentWorkspaceId ??

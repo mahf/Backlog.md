@@ -87,6 +87,7 @@ interface RemoteIndexEntry {
 	id: string;
 	branch: string;
 	path: string; // "backlog/tasks/task-123 - title.md"
+	objectId: string;
 	lastModified: Date;
 	commit: string;
 	stateEntry?: BranchTaskStateEntry;
@@ -96,6 +97,7 @@ interface HydrationCandidate {
 	id: string;
 	ref: string;
 	path: string;
+	objectId: string;
 	commit: string;
 	stateEntry?: BranchTaskStateEntry;
 }
@@ -103,6 +105,7 @@ interface HydrationCandidate {
 interface CachedTaskTreeEntry {
 	id: string;
 	path: string;
+	objectId: string;
 	type: TaskDirectoryType | null;
 	lastModified: number;
 }
@@ -178,6 +181,7 @@ function chooseIdentityHydrationCandidates(
 		id: entry.id,
 		ref: toRef(entry),
 		path: entry.path,
+		objectId: entry.objectId,
 		commit: entry.commit,
 		stateEntry: entry.stateEntry,
 	}));
@@ -277,6 +281,7 @@ function chooseWinners(
 				id,
 				ref: toRef(best),
 				path: best.path,
+				objectId: best.objectId,
 				commit: best.commit,
 				stateEntry: best.stateEntry,
 			});
@@ -293,6 +298,7 @@ function chooseWinners(
 					id,
 					ref: toRef(newestRemote),
 					path: newestRemote.path,
+					objectId: newestRemote.objectId,
 					commit: newestRemote.commit,
 					stateEntry: newestRemote.stateEntry,
 				});
@@ -312,6 +318,7 @@ function chooseWinners(
 				id,
 				ref: toRef(newestRemote),
 				path: newestRemote.path,
+				objectId: newestRemote.objectId,
 				commit: newestRemote.commit,
 				stateEntry: newestRemote.stateEntry,
 			});
@@ -396,6 +403,7 @@ export class BranchTaskLoader {
 							id: cached.id,
 							branch: branchRef.branch,
 							path: cached.path,
+							objectId: cached.objectId,
 							lastModified,
 							commit: branchRef.commit,
 						};
@@ -446,6 +454,7 @@ export class BranchTaskLoader {
 						id,
 						ref: toRef(best),
 						path: best.path,
+						objectId: best.objectId,
 						commit: best.commit,
 						stateEntry: best.stateEntry,
 					});
@@ -457,17 +466,20 @@ export class BranchTaskLoader {
 			);
 		};
 
+		const remoteWinners = candidatesFor(remoteIndex, "remote");
+		const localWinners = candidatesFor(localIndex, "local-branch");
+		const hydrationComplete = await this.cacheMissingTasks([...remoteWinners, ...localWinners]);
 		const loadTask = (commit: string, path: string) => this.loadCachedTask(commit, path);
 		const hydrationResults = await Promise.all([
-			hydrateTasks(candidatesFor(remoteIndex, "remote"), { source: "remote", loadTask }),
-			hydrateTasks(candidatesFor(localIndex, "local-branch"), {
+			hydrateTasks(remoteWinners, { source: "remote", loadTask }),
+			hydrateTasks(localWinners, {
 				source: "local-branch",
 				loadTask,
 			}),
 		]);
 		return {
 			entries: stateEntries,
-			complete: complete && hydrationResults.every(Boolean),
+			complete: complete && hydrationComplete && hydrationResults.every(Boolean),
 		};
 	}
 
@@ -522,16 +534,18 @@ export class BranchTaskLoader {
 		if (cached) return await cached;
 
 		const promise = (async (): Promise<readonly CachedTaskTreeEntry[]> => {
-			const files = await this.git.listFilesInTree(commit, backlogDir);
+			const files = await this.git.listFilesWithObjectIdsInTree(commit, backlogDir);
 			if (files.length === 0) return [];
 			const lastModified = await this.git.getBranchLastModifiedMap(commit, backlogDir, historyCutoff);
-			return files.flatMap((path) => {
+			return files.flatMap((file) => {
+				const { path } = file;
 				const id = extractConfiguredTaskId(path, prefix);
 				if (!id) return [];
 				return [
 					{
 						id,
 						path,
+						objectId: file.objectId,
 						type: getTaskTypeFromPath(path, backlogDir),
 						lastModified: (lastModified.get(path) ?? new Date(0)).getTime(),
 					},
@@ -547,27 +561,64 @@ export class BranchTaskLoader {
 		}
 	}
 
+	private async cacheMissingTasks(candidates: HydrationCandidate[]): Promise<boolean> {
+		const uniqueCandidates = new Map<string, HydrationCandidate>();
+		for (const candidate of candidates) {
+			uniqueCandidates.set(`${candidate.commit}\0${candidate.path}`, candidate);
+		}
+		const missing = [...uniqueCandidates].filter(([key]) => !this.taskCache.has(key));
+		if (missing.length > 0) {
+			const batch = this.git.showBlobs(missing.map(([, candidate]) => candidate.objectId)).then((contents) => {
+				if (contents.length !== missing.length) throw new Error("Git batch returned an unexpected number of blobs.");
+				return contents;
+			});
+			for (let index = 0; index < missing.length; index += 1) {
+				const [key, candidate] = missing[index] ?? [];
+				if (!key || !candidate) continue;
+				const promise = batch.then((contents) => {
+					const content = contents[index];
+					if (content === null || content === undefined) {
+						throw new Error(`Git blob ${candidate.objectId} is missing for ${candidate.commit}:${candidate.path}`);
+					}
+					try {
+						return normalizeTaskIdentity(parseTask(content));
+					} catch (error) {
+						console.error(`Failed to parse task ${candidate.commit}:${candidate.path}`, error);
+						return null;
+					}
+				});
+				this.taskCache.set(key, { commit: candidate.commit, promise });
+			}
+		}
+
+		const cachedCandidates = [...uniqueCandidates].map(([key, candidate]) => ({
+			key,
+			candidate,
+			cached: this.taskCache.get(key),
+		}));
+		const results = await Promise.allSettled(
+			cachedCandidates.map(({ cached }) => cached?.promise ?? Promise.resolve(null)),
+		);
+		let complete = true;
+		for (let index = 0; index < results.length; index += 1) {
+			const result = results[index];
+			const current = cachedCandidates[index];
+			if (!result || result.status === "fulfilled" || !current) continue;
+			complete = false;
+			if (this.taskCache.get(current.key) === current.cached) this.taskCache.delete(current.key);
+			console.error(
+				`Failed to hydrate task ${current.candidate.id} from ${current.candidate.ref}:${current.candidate.path}`,
+				result.reason,
+			);
+		}
+		return complete;
+	}
+
 	private async loadCachedTask(commit: string, path: string): Promise<Task | null> {
 		const key = `${commit}\0${path}`;
-		let cached = this.taskCache.get(key);
-		if (!cached) {
-			const promise = this.git.showFile(commit, path).then((content) => {
-				try {
-					return normalizeTaskIdentity(parseTask(content));
-				} catch (error) {
-					console.error(`Failed to parse task ${commit}:${path}`, error);
-					return null;
-				}
-			});
-			cached = { commit, promise };
-			this.taskCache.set(key, cached);
-		}
-		try {
-			const task = await cached.promise;
-			return task ? structuredClone(task) : null;
-		} catch (error) {
-			if (this.taskCache.get(key)?.promise === cached.promise) this.taskCache.delete(key);
-			throw error;
-		}
+		const cached = this.taskCache.get(key);
+		if (!cached) return null;
+		const task = await cached.promise;
+		return task ? structuredClone(task) : null;
 	}
 }

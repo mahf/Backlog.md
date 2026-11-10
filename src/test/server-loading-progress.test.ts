@@ -77,6 +77,42 @@ afterEach(async () => {
 });
 
 describe("browser corpus loading progress", () => {
+	it("keeps a real task-detail request open through delayed initialization", async () => {
+		let releaseLoad: () => void = () => {};
+		let signalLoadStarted: () => void = () => {};
+		const heldLoad = new Promise<void>((resolve) => {
+			releaseLoad = resolve;
+		});
+		const loadStarted = new Promise<void>((resolve) => {
+			signalLoadStarted = resolve;
+		});
+		server = new BacklogServer(testDir);
+		internals(server).core.loadTasks = async () => {
+			signalLoadStarted();
+			await heldLoad;
+			return [];
+		};
+		const originalServe = Bun.serve;
+		let configuredIdleTimeout: number | undefined;
+		Bun.serve = ((options: Parameters<typeof Bun.serve>[0]) => {
+			configuredIdleTimeout = (options as { idleTimeout?: number }).idleTimeout;
+			return originalServe(options);
+		}) as typeof Bun.serve;
+		try {
+			await server.start(0, false);
+		} finally {
+			Bun.serve = originalServe;
+		}
+		expect(configuredIdleTimeout).toBe(60);
+
+		const port = server.getPort() ?? 0;
+		const responsePromise = fetch(`http://127.0.0.1:${port}/api/task/TASK-404`);
+		await loadStarted;
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		releaseLoad();
+		expect((await responsePromise).status).toBe(404);
+	});
+
 	it("forwards Core progress verbatim to current and late sockets without duplicating the shared load", async () => {
 		let loadCalls = 0;
 		let reportPhase: () => void = () => {};

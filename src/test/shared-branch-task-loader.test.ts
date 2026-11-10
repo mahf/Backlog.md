@@ -4,6 +4,7 @@ import { Core } from "../core/backlog.ts";
 import { BranchTaskLoader } from "../core/task-loader.ts";
 import type { GitBranchTip, GitOperations } from "../git/operations.ts";
 import type { BacklogConfig, Task } from "../types/index.ts";
+import { installBatchTaskGitFixture } from "./branch-task-loader-fixtures.ts";
 import { pinTimeZone } from "./pin-timezone.ts";
 import { createUniqueTestDir, initializeFilesystemTestProject, safeCleanup } from "./test-utils.ts";
 
@@ -70,7 +71,7 @@ describe("shared immutable branch task loading", () => {
 					updatedDate,
 					filePath: `/tmp/mixed-utc/${path}`,
 				};
-				await new BranchTaskLoader(git).load(
+				await new BranchTaskLoader(installBatchTaskGitFixture(git)).load(
 					[
 						{ name: "main", commit: "0".repeat(40), current: true },
 						{ name: "feature/older", commit: "1".repeat(40), current: false },
@@ -132,7 +133,7 @@ describe("shared immutable branch task loading", () => {
 				return commit === sharedCommit ? taskMarkdown("TASK-1", "Shared task") : taskMarkdown("TASK-2", "Changed task");
 			},
 		} as unknown as GitOperations;
-		const loader = new BranchTaskLoader(git);
+		const loader = new BranchTaskLoader(installBatchTaskGitFixture(git));
 		const currentTip: GitBranchTip = { name: "main", commit: "0".repeat(40), current: true };
 		const localTip: GitBranchTip = { name: "feature/shared", commit: sharedCommit, current: false };
 		const firstTips: GitBranchTip[] = [
@@ -221,6 +222,7 @@ describe("shared immutable branch task loading", () => {
 				hydrationCalls += 1;
 				return taskMarkdown("TASK-1", "Branch fallback");
 			};
+			installBatchTaskGitFixture(core.git);
 			core.git.getRepositoryRoot = async () => null;
 
 			expect((await core.queryTasks()).map((task) => task.title)).toEqual(["Working copy"]);
@@ -282,6 +284,7 @@ describe("shared immutable branch task loading", () => {
 					? taskMarkdown("TASK-1", "Healthy task")
 					: taskMarkdown("TASK-2", "Recovered task");
 			};
+			installBatchTaskGitFixture(core.git);
 			core.git.getRepositoryRoot = async () => null;
 
 			expect((await core.queryTasks()).map((task) => task.title)).toEqual(["Healthy task"]);
@@ -395,16 +398,23 @@ describe("shared immutable branch task loading", () => {
 			{ name: "feature/cached", commit: branchCommit, current: false },
 		];
 		const warmLoader = new BranchTaskLoader(
-			createGit(() => {
-				warmHistoryCalls += 1;
-			}),
+			installBatchTaskGitFixture(
+				createGit(() => {
+					warmHistoryCalls += 1;
+				}),
+			),
 		);
 
 		try {
 			await warmLoader.load(tips, config, [], false);
 			logicalNow = new Date("2026-08-12T12:00:00Z").getTime();
 			const { entries: warm } = await warmLoader.load(tips, config, [], false);
-			const { entries: cold } = await new BranchTaskLoader(createGit()).load(tips, config, [], false);
+			const { entries: cold } = await new BranchTaskLoader(installBatchTaskGitFixture(createGit())).load(
+				tips,
+				config,
+				[],
+				false,
+			);
 
 			expect(warmHistoryCalls).toBe(2);
 			expect(warm.map((entry) => entry.lastModified.toISOString())).toEqual(
@@ -424,7 +434,7 @@ describe("shared immutable branch task loading", () => {
 			getBranchLastModifiedMap: async () => new Map([[path, new Date("2026-08-10T00:00:00Z")]]),
 			showFile: async () => taskMarkdown("TASK-1", "Feature task"),
 		} as unknown as GitOperations;
-		const loader = new BranchTaskLoader(git);
+		const loader = new BranchTaskLoader(installBatchTaskGitFixture(git));
 
 		const { entries: loaded } = await loader.load(
 			[{ name: "feature/task", commit: featureCommit, current: false }],
@@ -441,7 +451,7 @@ describe("shared immutable branch task loading", () => {
 		const git = {
 			getCurrentBranch: async () => "",
 		} as unknown as GitOperations;
-		const loader = new BranchTaskLoader(git);
+		const loader = new BranchTaskLoader(installBatchTaskGitFixture(git));
 
 		expect(
 			(
@@ -476,6 +486,7 @@ describe("shared immutable branch task loading", () => {
 			core.git.listFilesInTree = async () => [path];
 			core.git.getBranchLastModifiedMap = async () => new Map([[path, new Date("2026-08-10T00:00:00Z")]]);
 			core.git.showFile = async () => taskMarkdown("TASK-1", "Feature task");
+			installBatchTaskGitFixture(core.git);
 			core.git.getRepositoryRoot = async () => null;
 
 			expect((await core.queryTasks()).map((task) => task.title)).toEqual(["Feature task"]);
@@ -518,6 +529,7 @@ describe("shared immutable branch task loading", () => {
 				return since instanceof Date && fileModified < since ? new Map() : new Map([[path, fileModified]]);
 			};
 			core.git.showFile = async () => taskMarkdown("TASK-1", "Feature task");
+			installBatchTaskGitFixture(core.git);
 			core.git.getRepositoryRoot = async () => null;
 
 			expect((await core.queryTasks()).map((task) => task.title)).toEqual(["Feature task"]);
@@ -868,6 +880,7 @@ describe("shared immutable branch task loading", () => {
 		core.git.listFilesInTree = async () => [branchPath];
 		core.git.getBranchLastModifiedMap = async () => new Map([[branchPath, new Date("2026-08-09T00:00:00Z")]]);
 		core.git.showFile = async () => taskMarkdown("TASK-1", "Older branch state");
+		installBatchTaskGitFixture(core.git);
 		core.git.getRepositoryRoot = async () => null;
 
 		expect(await core.loadTasks()).toEqual([]);
@@ -1084,7 +1097,7 @@ describe("shared immutable branch task loading", () => {
 				return taskMarkdown("TASK-1", "Stable tie winner");
 			},
 		} as unknown as GitOperations;
-		const loader = new BranchTaskLoader(git);
+		const loader = new BranchTaskLoader(installBatchTaskGitFixture(git));
 		const tips: GitBranchTip[] = [
 			{ name: "main", commit: "0".repeat(40), current: true },
 			{ name: "feature/alpha", commit: alphaCommit, current: false },
@@ -1161,6 +1174,7 @@ describe("shared immutable branch task loading", () => {
 			showCalls.set(commit, (showCalls.get(commit) ?? 0) + 1);
 			return commit === oldCommit ? taskMarkdown("TASK-1", "Stale task") : taskMarkdown("TASK-2", "Stable task");
 		};
+		installBatchTaskGitFixture(core.git);
 		core.git.getRepositoryRoot = async () => null;
 
 		const first = await core.loadTasks();

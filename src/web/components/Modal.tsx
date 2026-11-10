@@ -9,6 +9,7 @@ interface ModalProps {
 	disableEscapeClose?: boolean; // when true, Escape and backdrop click won't close (child can handle it)
 	actions?: React.ReactNode; // optional actions rendered in header before close
 	initialFocusRef?: React.RefObject<HTMLElement | null>;
+	internalScroll?: boolean;
 }
 
 const Modal: React.FC<ModalProps> = ({
@@ -20,6 +21,7 @@ const Modal: React.FC<ModalProps> = ({
 	disableEscapeClose,
 	actions,
 	initialFocusRef,
+	internalScroll = false,
 }) => {
 	const dialogRef = useRef<HTMLDivElement | null>(null);
 	const onCloseRef = useRef(onClose);
@@ -114,7 +116,7 @@ const Modal: React.FC<ModalProps> = ({
 		>
 			<div
 				ref={dialogRef}
-				className={`bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-600 shadow-2xl ${maxWidthClass} w-full max-h-[94vh] overflow-y-auto transition-colors duration-200`}
+				className={`bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-600 shadow-2xl ${maxWidthClass} w-full max-h-[94vh] ${internalScroll ? "flex flex-col overflow-hidden" : "overflow-y-auto"} transition-colors duration-200`}
 				onClick={(event) => event.stopPropagation()}
 				role="dialog"
 				tabIndex={-1}
@@ -138,7 +140,7 @@ const Modal: React.FC<ModalProps> = ({
 						</button>
 					</div>
 				</div>
-				<div className="px-6 pt-4 pb-6">{children}</div>
+				<div className={`px-6 pt-4 pb-6 ${internalScroll ? "flex min-h-0 flex-1 flex-col overflow-y-auto lg:overflow-hidden" : ""}`}>{children}</div>
 			</div>
 		</div>
 	);

@@ -11,6 +11,18 @@ type GitPathContext = {
 
 type GitConfigLoader = () => Promise<BacklogConfig | null>;
 
+type GitExecOptions = {
+	readOnly?: boolean;
+	cwd?: string;
+	input?: string | Uint8Array;
+	env?: NodeJS.ProcessEnv;
+	acceptedExitCodes?: readonly number[];
+	timeoutMs?: number;
+};
+
+type GitExecTextResult = { stdout: string; stderr: string };
+type GitExecBytesResult = { stdout: Uint8Array; stderr: string };
+
 const FETCH_TIMEOUT_MS = 10_000;
 
 export interface GitBranchTip {
@@ -23,6 +35,42 @@ export interface GitIndexEntry {
 	mode: string;
 	objectId: string;
 	stage: number;
+}
+
+function parseGitBatchOutput(output: Uint8Array, expectedObjectIds: readonly string[]): Array<string | null> {
+	const decoder = new TextDecoder();
+	const contents: Array<string | null> = [];
+	let offset = 0;
+	for (const expectedObjectId of expectedObjectIds) {
+		let headerEnd = offset;
+		while (headerEnd < output.length && output[headerEnd] !== 10) headerEnd += 1;
+		if (headerEnd === output.length) throw new Error("Git batch output ended before an object header was complete.");
+		const header = decoder.decode(output.subarray(offset, headerEnd));
+		offset = headerEnd + 1;
+		const missing = /^([0-9a-f]+) missing$/i.exec(header);
+		if (missing) {
+			if (missing[1]?.toLowerCase() !== expectedObjectId.toLowerCase()) {
+				throw new Error(`Unexpected Git batch object header: ${header}`);
+			}
+			contents.push(null);
+			continue;
+		}
+		const match = /^([0-9a-f]+) ([a-z]+) (\d+)$/i.exec(header);
+		if (!match) throw new Error(`Unexpected Git batch object header: ${header}`);
+		if (match[1]?.toLowerCase() !== expectedObjectId.toLowerCase()) {
+			throw new Error(`Unexpected Git batch object header: ${header}`);
+		}
+		const size = Number(match[3]);
+		if (!Number.isSafeInteger(size) || size < 0 || offset + size >= output.length) {
+			throw new Error(`Invalid Git batch object size in header: ${header}`);
+		}
+		const end = offset + size;
+		if (output[end] !== 10) throw new Error(`Git batch object content was not newline-terminated: ${header}`);
+		contents.push(match[2] === "blob" ? decoder.decode(output.subarray(offset, end)) : null);
+		offset = end + 1;
+	}
+	if (offset !== output.length) throw new Error("Git batch output contained unexpected trailing data.");
+	return contents;
 }
 
 function indexEntriesEqual(left: readonly GitIndexEntry[], right: readonly GitIndexEntry[]): boolean {
@@ -924,11 +972,24 @@ export class GitOperations {
 	}
 
 	async listFilesInTree(ref: string, path: string): Promise<string[]> {
+		return (await this.listFilesWithObjectIdsInTree(ref, path)).map((entry) => entry.path);
+	}
+
+	async listFilesWithObjectIdsInTree(ref: string, path: string): Promise<Array<{ path: string; objectId: string }>> {
 		if (!(await this.isRepository())) {
 			return [];
 		}
-		const { stdout } = await this.execGit(["ls-tree", "-r", "--name-only", "-z", ref, "--", path], { readOnly: true });
-		return stdout.split("\0").filter(Boolean);
+		const { stdout } = await this.execGit(["ls-tree", "-r", "-z", ref, "--", path], { readOnly: true });
+		return stdout
+			.split("\0")
+			.filter(Boolean)
+			.flatMap((entry) => {
+				const tabIndex = entry.indexOf("\t");
+				if (tabIndex < 0) return [];
+				const [mode, type, objectId] = entry.slice(0, tabIndex).split(" ");
+				if (!mode || !type || !objectId) return [];
+				return [{ path: entry.slice(tabIndex + 1), objectId }];
+			});
 	}
 
 	async hashFile(filePath: string): Promise<string | null> {
@@ -954,6 +1015,23 @@ export class GitOperations {
 		}
 		const { stdout } = await this.execGit(["show", `${ref}:${filePath}`], { readOnly: true });
 		return stdout;
+	}
+
+	async showBlobs(objectIds: readonly string[]): Promise<Array<string | null>> {
+		if (objectIds.length === 0) return [];
+		if (!(await this.isRepository())) return objectIds.map(() => null);
+		if (objectIds.some((objectId) => !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(objectId))) {
+			throw new Error("Git batch object IDs must be full SHA-1 or SHA-256 hashes.");
+		}
+		const uniqueObjectIds = [...new Set(objectIds)];
+		const { stdout } = await this.execGit(["cat-file", "--batch"], {
+			input: `${uniqueObjectIds.join("\n")}\n`,
+			readOnly: true,
+			rawStdout: true,
+		});
+		const contents = parseGitBatchOutput(stdout, uniqueObjectIds);
+		const byObjectId = new Map(uniqueObjectIds.map((objectId, index) => [objectId, contents[index] ?? null]));
+		return objectIds.map((objectId) => byObjectId.get(objectId) ?? null);
 	}
 
 	/**
@@ -1083,17 +1161,12 @@ export class GitOperations {
 		}
 	}
 
+	private async execGit(args: string[], options: GitExecOptions & { rawStdout: true }): Promise<GitExecBytesResult>;
+	private async execGit(args: string[], options?: GitExecOptions): Promise<GitExecTextResult>;
 	private async execGit(
 		args: string[],
-		options?: {
-			readOnly?: boolean;
-			cwd?: string;
-			input?: string;
-			env?: NodeJS.ProcessEnv;
-			acceptedExitCodes?: readonly number[];
-			timeoutMs?: number;
-		},
-	): Promise<{ stdout: string; stderr: string }> {
+		options?: GitExecOptions & { rawStdout?: boolean },
+	): Promise<GitExecTextResult | GitExecBytesResult> {
 		// Use Bun.spawn so we can explicitly control stdio behaviour on Windows. When running
 		// under the MCP stdio transport, delegating to git with inherited stdin can deadlock.
 		const env = {
@@ -1122,22 +1195,39 @@ export class GitOperations {
 		});
 		const stdoutReader = subprocess.stdout?.getReader();
 		const stderrReader = subprocess.stderr?.getReader();
-		const readAll = async (reader: ReadableStreamDefaultReader<Uint8Array> | undefined): Promise<string> => {
-			if (!reader) return "";
-			const decoder = new TextDecoder();
-			let output = "";
+		const readAll = async (reader: ReadableStreamDefaultReader<Uint8Array> | undefined): Promise<Uint8Array> => {
+			if (!reader) return new Uint8Array();
+			const chunks: Uint8Array[] = [];
+			let length = 0;
 			while (true) {
 				const { done, value } = await reader.read();
-				if (done) return `${output}${decoder.decode()}`;
-				output += decoder.decode(value, { stream: true });
+				if (done) break;
+				chunks.push(value);
+				length += value.length;
 			}
+			const output = new Uint8Array(length);
+			let offset = 0;
+			for (const chunk of chunks) {
+				output.set(chunk, offset);
+				offset += chunk.length;
+			}
+			return output;
 		};
-		if (options?.input !== undefined && subprocess.stdin) {
-			subprocess.stdin.write(options.input);
-			await subprocess.stdin.end();
-		}
-
 		const completion = Promise.all([subprocess.exited, readAll(stdoutReader), readAll(stderrReader)]);
+		const run = async () => {
+			let inputError: unknown;
+			if (options?.input !== undefined && subprocess.stdin) {
+				try {
+					subprocess.stdin.write(options.input);
+					await subprocess.stdin.end();
+				} catch (error) {
+					inputError = error;
+				}
+			}
+			const result = await completion;
+			if (inputError) throw inputError;
+			return result;
+		};
 		const killDirectly = () => {
 			try {
 				subprocess.kill("SIGKILL");
@@ -1182,9 +1272,9 @@ export class GitOperations {
 		try {
 			result =
 				options?.timeoutMs === undefined
-					? await completion
+					? await run()
 					: await Promise.race([
-							completion,
+							run(),
 							new Promise<never>((_, reject) => {
 								timeout = setTimeout(() => {
 									killProcessTree();
@@ -1198,13 +1288,17 @@ export class GitOperations {
 		} finally {
 			if (timeout) clearTimeout(timeout);
 		}
-		const [exitCode, stdout, stderr] = result;
+		const [exitCode, stdoutBytes, stderrBytes] = result;
+		const stderr = new TextDecoder().decode(stderrBytes);
 
 		if (exitCode !== 0 && !options?.acceptedExitCodes?.includes(exitCode)) {
 			throw new Error(`Git command failed (exit code ${exitCode}): git ${args.join(" ")}\n${stderr}`);
 		}
 
-		return { stdout, stderr };
+		return {
+			stdout: options?.rawStdout ? stdoutBytes : new TextDecoder().decode(stdoutBytes),
+			stderr,
+		} as GitExecTextResult | GitExecBytesResult;
 	}
 
 	private async getPathContext(targetPath: string): Promise<GitPathContext | null> {

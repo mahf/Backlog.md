@@ -377,6 +377,9 @@ const resolveMockResponse = async (url: URL): Promise<Response> => {
 		if (url.pathname === "/api/statuses") {
 			return json(["To Do", "In Progress", "Done"]);
 		}
+		if (url.pathname === "/api/workspaces") {
+			return json([]);
+		}
 		if (url.pathname === "/api/config") {
 			return json(defaultConfig);
 		}

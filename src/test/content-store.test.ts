@@ -567,6 +567,33 @@ describe("ContentStore", () => {
 		expect(store.resolveTaskForRead("TASK-1").status).toBe("ambiguous");
 	});
 
+	it("does not publish an unchanged visible corpus with duplicate branch identities", async () => {
+		await filesystem.saveTask({ ...sampleTask, id: "TASK-1", title: "Local task" });
+		store = new ContentStore(
+			filesystem,
+			branchSnapshotLoader(join(TEST_DIR, "branches", "feature", "backlog", "tasks", "task-1.md")),
+		);
+		await store.ensureInitialized();
+		expect(store.resolveTaskForRead("TASK-1").status).toBe("ambiguous");
+
+		let taskPublications = 0;
+		const unsubscribe = store.subscribe((event) => {
+			if (event.type === "tasks") taskPublications += 1;
+		});
+		await store.refreshLocalTaskCorpus();
+		expect(taskPublications).toBe(0);
+
+		await filesystem.saveTask({ ...sampleTask, id: "TASK-2", title: "New local task" });
+		await store.refreshLocalTaskCorpus();
+		expect(taskPublications).toBe(1);
+		expect(store.resolveTaskForRead("TASK-1").status).toBe("ambiguous");
+		expect(store.resolveTaskForRead("TASK-2").status).toBe("found");
+
+		await store.refreshLocalTaskCorpus();
+		expect(taskPublications).toBe(1);
+		unsubscribe();
+	});
+
 	it("refreshes completed identity state when the completed corpus changes", async () => {
 		store.dispose();
 		const core = new Core(TEST_DIR, { enableWatchers: true });

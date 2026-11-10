@@ -63,6 +63,67 @@ describe("Git Operations", () => {
 		});
 	});
 
+	describe("showBlobs", () => {
+		it("reads blobs through NUL-delimited tree paths and reports a missing object", async () => {
+			const directory = await mkdtemp(join(tmpdir(), "backlog-git-batch-paths-"));
+			const runGit = (...args: string[]) => {
+				const result = Bun.spawnSync(["git", ...args], { cwd: directory, stdout: "pipe", stderr: "pipe" });
+				if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+				return result.stdout.toString().trim();
+			};
+			const path =
+				process.platform === "win32"
+					? "backlog/tasks/task-23 - spaced café continued.md"
+					: "backlog/tasks/task-23 - spaced café\ncontinued.md";
+			const content = "---\nid: TASK-23\ntitle: Unicode 雪\n---\n\nFirst line\nSecond line\n";
+			try {
+				runGit("init", "-b", "main");
+				runGit("config", "user.name", "Test User");
+				runGit("config", "user.email", "test@example.com");
+				runGit("config", "core.autocrlf", "false");
+				await mkdir(join(directory, "backlog", "tasks"), { recursive: true });
+				await writeFile(join(directory, path), content);
+				runGit("add", "--all");
+				runGit("commit", "-m", "Add newline path fixture");
+
+				const git = new GitOperations(directory, TEST_CONFIG);
+				const files = await git.listFilesWithObjectIdsInTree("HEAD", "backlog/tasks");
+				expect(files.map((file) => file.path)).toEqual([path]);
+				const objectId = files[0]?.objectId ?? "";
+				expect(await git.showBlobs([objectId, "f".repeat(40), objectId])).toEqual([content, null, content]);
+			} finally {
+				await rm(directory, { recursive: true, force: true });
+			}
+		});
+
+		it("drains Git output while sending batch input larger than a pipe buffer", async () => {
+			const git = new GitOperations(process.cwd(), TEST_CONFIG);
+			const internals = git as unknown as {
+				execGit: {
+					(args: string[], options: { readOnly: true }): Promise<{ stdout: string; stderr: string }>;
+					(
+						args: string[],
+						options: { input: string; readOnly: true; rawStdout: true },
+					): Promise<{
+						stdout: Uint8Array;
+						stderr: string;
+					}>;
+				};
+			};
+			const { stdout: objectId } = await internals.execGit(["rev-parse", "HEAD:src/test/pin-timezone.ts"], {
+				readOnly: true,
+			});
+			const batchInput = `${objectId.trim()}\n`.repeat(1800);
+			const { stdout } = await internals.execGit(["cat-file", "--batch"], {
+				input: batchInput,
+				readOnly: true,
+				rawStdout: true,
+			});
+			expect(new TextEncoder().encode(batchInput).length).toBeGreaterThan(64 * 1024);
+			expect(stdout.length).toBeGreaterThan(64 * 1024);
+		});
+	});
+
 	describe("missing parent paths", () => {
 		it.skipIf(process.platform === "win32")(
 			"refuses an unresolvable selected path before committing owned staged files",

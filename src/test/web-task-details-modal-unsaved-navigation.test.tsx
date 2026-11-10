@@ -265,4 +265,139 @@ describe("Task details modal navigation with unsaved edits", () => {
 		expect(prompts).toBe(0);
 		expect(currentPath).toBe("/tasks/BACK-2");
 	});
+
+	it("navigates the outline within the content without prompting about unsaved edits", async () => {
+		const container = await mountModal();
+		await startEditingWithUnsavedChanges(container);
+		const prompts = declineOnConfirm();
+		const scrollCalls: ScrollToOptions[] = [];
+		const originalScrollTo = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollTo");
+		Object.defineProperty(HTMLElement.prototype, "scrollTo", {
+			configurable: true,
+			value: (options: ScrollToOptions) => scrollCalls.push(options),
+		});
+
+		const sectionNav = container.querySelector('[aria-label="Task sections"]');
+		const outlineButtons = Array.from(sectionNav?.querySelectorAll<HTMLButtonElement>("[data-section]") ?? []);
+		expect(outlineButtons.length).toBeGreaterThan(0);
+		for (const button of outlineButtons) {
+			const id = button.getAttribute("data-section");
+			expect(id).toBeTruthy();
+			expect(container.querySelector(`[data-task-section="${id}"]`)).toBeTruthy();
+		}
+
+		const targetSection = container.querySelector<HTMLElement>('[data-task-section="implementation-plan"]');
+		const contentScroller = container.querySelector<HTMLElement>("[data-task-section=description]")?.parentElement;
+		expect(targetSection).toBeTruthy();
+		expect(contentScroller).toBeTruthy();
+		Object.defineProperty(contentScroller, "scrollTop", { configurable: true, value: 20, writable: true });
+		Object.defineProperty(contentScroller, "scrollHeight", { configurable: true, value: 500 });
+		Object.defineProperty(contentScroller, "clientHeight", { configurable: true, value: 200 });
+		Object.defineProperty(contentScroller, "getBoundingClientRect", { configurable: true, value: () => ({ top: 100 }) });
+		Object.defineProperty(targetSection, "getBoundingClientRect", { configurable: true, value: () => ({ top: 350 }) });
+		try {
+			const planButton = outlineButtons.find((button) => button.textContent?.trim() === "Implementation Plan") as HTMLButtonElement;
+			await click(planButton);
+
+			expect(prompts).toHaveLength(0);
+			expect(scrollCalls).toHaveLength(1);
+			expect(scrollCalls[0]?.top).toBe(270);
+			expect(scrollCalls[0]?.behavior).toBe("auto");
+			expect(planButton.getAttribute("aria-current")).toBe("location");
+			expect(planButton.className).toContain("bg-blue-50");
+
+			for (const section of Array.from(container.querySelectorAll<HTMLElement>("[data-task-section]"))) {
+				Object.defineProperty(section, "getBoundingClientRect", { configurable: true, value: () => ({ top: 500 }) });
+			}
+			Object.defineProperty(container.querySelector('[data-task-section="description"]'), "getBoundingClientRect", {
+				configurable: true,
+				value: () => ({ top: 110 }),
+			});
+			Object.defineProperty(container.querySelector('[data-task-section="acceptance-criteria"]'), "getBoundingClientRect", {
+				configurable: true,
+				value: () => ({ top: 120 }),
+			});
+			Object.defineProperty(container.querySelector('[data-task-section="definition-of-done"]'), "getBoundingClientRect", {
+				configurable: true,
+				value: () => ({ top: 180 }),
+			});
+			await act(async () => {
+				contentScroller?.dispatchEvent(new window.Event("scroll", { bubbles: true }));
+				await Promise.resolve();
+			});
+			expect(sectionNav?.querySelector('[data-section="acceptance-criteria"]')?.getAttribute("aria-current")).toBe("location");
+		} finally {
+			if (originalScrollTo) Object.defineProperty(HTMLElement.prototype, "scrollTo", originalScrollTo);
+			else Object.defineProperty(HTMLElement.prototype, "scrollTo", { configurable: true, value: undefined });
+		}
+	});
+
+	it("toggles the outline from its sidebar header and preserves focus when collapsed", async () => {
+		const container = await mountModal();
+		const sectionNav = container.querySelector('[aria-label="Task sections"]');
+		const toggle = sectionNav?.querySelector<HTMLButtonElement>("[data-outline-toggle]") ?? null;
+		const heading = sectionNav?.querySelector("h2");
+		if (!toggle) throw new Error("Outline toggle is missing");
+		expect(heading?.textContent).toBe("Outline");
+		expect(toggle?.textContent?.trim()).toBe("");
+		expect(toggle?.getAttribute("aria-label")).toBe("Hide task outline");
+		expect(toggle?.title).toBe("Hide task outline");
+		expect(toggle?.getAttribute("aria-expanded")).toBe("true");
+		expect(toggle?.getAttribute("aria-controls")).toBe("task-outline-content");
+		expect(toggle?.parentElement?.textContent).toContain("Outline");
+		expect(container.querySelector("#task-outline-content ul")).toBeTruthy();
+
+		(toggle as HTMLButtonElement).focus();
+		await click(toggle as HTMLButtonElement);
+		expect(toggle?.getAttribute("aria-expanded")).toBe("false");
+		expect(toggle?.getAttribute("aria-label")).toBe("Show task outline");
+		expect(toggle?.title).toBe("Show task outline");
+		expect(document.activeElement).toBe(toggle);
+		expect(sectionNav).toBeTruthy();
+		expect(container.querySelector("#task-outline-content ul")).toBeNull();
+		const compactGrid = Array.from(container.querySelectorAll("div")).find((element) =>
+			element.className.includes("lg:grid-cols-[minmax(0,1fr)_18rem]"),
+		);
+		expect(compactGrid).toBeTruthy();
+		expect(sectionNav?.className).toContain("lg:absolute");
+		expect(sectionNav?.className).toContain("lg:left-0");
+		expect(sectionNav?.className).toContain("lg:top-0");
+		expect(sectionNav?.className).toContain("border-r-0");
+		expect(sectionNav?.className).toContain("lg:overflow-visible");
+
+		await click(toggle as HTMLButtonElement);
+		expect(toggle?.getAttribute("aria-expanded")).toBe("true");
+		expect(toggle?.getAttribute("aria-label")).toBe("Hide task outline");
+		expect(container.querySelector("#task-outline-content ul")).toBeTruthy();
+		const expandedGrid = Array.from(container.querySelectorAll("div")).find((element) =>
+			element.className.includes("lg:grid-cols-[11rem_minmax(0,1fr)_18rem]"),
+		);
+		expect(expandedGrid).toBeTruthy();
+		expect(sectionNav?.className).not.toContain("lg:absolute");
+		expect(sectionNav?.className).toContain("border-r");
+		expect(sectionNav?.className).toContain("lg:overflow-y-auto");
+	});
+
+	it("uses the document scroll when the content column has no independent overflow", async () => {
+		const container = await mountModal();
+		const outlineButton = container.querySelector<HTMLButtonElement>('[aria-label="Task sections"] [data-section="implementation-plan"]');
+		const targetSection = container.querySelector<HTMLElement>('[data-task-section="implementation-plan"]');
+		const scrollCalls: ScrollIntoViewOptions[] = [];
+		const originalScrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
+		Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+			configurable: true,
+			value: (options: ScrollIntoViewOptions) => scrollCalls.push(options),
+		});
+		try {
+			expect(outlineButton).toBeTruthy();
+			expect(targetSection).toBeTruthy();
+			await click(outlineButton as HTMLButtonElement);
+			expect(scrollCalls).toHaveLength(1);
+			expect(scrollCalls[0]?.behavior).toBe("auto");
+			expect(scrollCalls[0]?.block).toBe("start");
+		} finally {
+			if (originalScrollIntoView) Object.defineProperty(HTMLElement.prototype, "scrollIntoView", originalScrollIntoView);
+			else Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: undefined });
+		}
+	});
 });
